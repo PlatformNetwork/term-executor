@@ -6,66 +6,131 @@ on:
   pull_request:
     branches: [main]
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   CARGO_TERM_COLOR: always
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUST_BACKTRACE: short
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    name: Lint & Format
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@nightly
-        with:
-          components: rustfmt, clippy
-      - uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-lint-${{ hashFiles('**/Cargo.lock') }}
-      - run: cargo +nightly fmt --check
-      - run: cargo +nightly clippy -- -D warnings
 
-  build-and-test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/cache@v4
+      - name: Install mold linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold clang
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      - name: Build
-        run: cargo build --release
-      - name: Test
-        run: cargo test
+          key: lint-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            lint-${{ runner.os }}-nightly-
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
+
+      - name: Clippy
+        run: cargo +nightly clippy --all-targets -- -D warnings
+
+  build:
+    name: Build (nightly, release, 32 threads)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold clang
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: build-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            build-${{ runner.os }}-nightly-
+
+      - name: Build release
+        run: cargo +nightly build --release -j $(nproc)
+        env:
+          RUSTFLAGS: "-C debuginfo=0 -C target-cpu=native -C link-arg=-fuse-ld=mold -D warnings"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: term-executor-linux-x86_64
+          path: target/release/term-executor
+          retention-days: 7
+
+  test:
+    name: Tests (nightly, 32 threads)
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mold linker
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold clang
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry + target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            test-${{ runner.os }}-nightly-
+
+      - name: Run tests
+        run: cargo +nightly test --release -j $(nproc) -- --test-threads=$(nproc)
+        env:
+          RUST_LOG: warn
 
   docker:
-    needs: [lint, build-and-test]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    name: Docker build
+    runs-on: blacksmith-32vcpu-ubuntu-2404
+    needs: [lint, build, test]
+    if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to GHCR
+
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and push
-        uses: docker/build-push-action@v5
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: true
           tags: |
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest
-            ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ghcr.io/${{ github.repository }}:latest
+            ghcr.io/${{ github.repository }}:${{ github.sha }}

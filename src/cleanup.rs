@@ -13,10 +13,11 @@ pub async fn remove_work_dir(path: &Path) {
 
 /// Kill all processes in a process group (best-effort).
 #[allow(dead_code)]
-pub fn kill_process_group(pgid: u32) {
-    unsafe {
-        libc::kill(-(pgid as i32), libc::SIGKILL);
-    }
+pub async fn kill_process_group(pgid: u32) {
+    let _ = tokio::process::Command::new("kill")
+        .args(["-9", &format!("-{}", pgid)])
+        .output()
+        .await;
 }
 
 /// Scan workspace base for stale session directories older than max_age_secs.

@@ -3,7 +3,6 @@ use std::path::PathBuf;
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_SESSION_TTL: u64 = 1800;
 const DEFAULT_MAX_CONCURRENT: usize = 4;
-const DEFAULT_DISK_QUOTA_MB: u64 = 2048;
 const DEFAULT_CLONE_TIMEOUT: u64 = 120;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
@@ -17,7 +16,6 @@ pub struct Config {
     pub auth_token: Option<String>,
     pub session_ttl_secs: u64,
     pub max_concurrent_evals: usize,
-    pub disk_quota_mb: u64,
     pub clone_timeout_secs: u64,
     pub agent_timeout_secs: u64,
     pub test_timeout_secs: u64,
@@ -34,7 +32,6 @@ impl Config {
             auth_token: std::env::var("AUTH_TOKEN").ok(),
             session_ttl_secs: env_parse("SESSION_TTL_SECS", DEFAULT_SESSION_TTL),
             max_concurrent_evals: env_parse("MAX_CONCURRENT_EVALS", DEFAULT_MAX_CONCURRENT),
-            disk_quota_mb: env_parse("DISK_QUOTA_MB", DEFAULT_DISK_QUOTA_MB),
             clone_timeout_secs: env_parse("CLONE_TIMEOUT_SECS", DEFAULT_CLONE_TIMEOUT),
             agent_timeout_secs: env_parse("AGENT_TIMEOUT_SECS", DEFAULT_AGENT_TIMEOUT),
             test_timeout_secs: env_parse("TEST_TIMEOUT_SECS", DEFAULT_TEST_TIMEOUT),
@@ -54,7 +51,6 @@ impl Config {
         tracing::info!("║  Auth:              {:<28}║", if self.auth_token.is_some() { "enabled" } else { "disabled" });
         tracing::info!("║  Max concurrent:    {:<28}║", self.max_concurrent_evals);
         tracing::info!("║  Session TTL:       {:<25}s ║", self.session_ttl_secs);
-        tracing::info!("║  Disk quota:        {:<24}MB ║", self.disk_quota_mb);
         tracing::info!("║  Clone timeout:     {:<25}s ║", self.clone_timeout_secs);
         tracing::info!("║  Agent timeout:     {:<25}s ║", self.agent_timeout_secs);
         tracing::info!("║  Test timeout:      {:<25}s ║", self.test_timeout_secs);
@@ -79,7 +75,6 @@ mod tests {
         let cfg = Config::from_env();
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_evals, DEFAULT_MAX_CONCURRENT);
-        assert_eq!(cfg.disk_quota_mb, DEFAULT_DISK_QUOTA_MB);
     }
 
     #[test]

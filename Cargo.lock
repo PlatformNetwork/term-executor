@@ -1726,7 +1726,6 @@ dependencies = [
  "dashmap",
  "flate2",
  "hex",
- "libc",
  "parking_lot",
  "reqwest",
  "serde",
