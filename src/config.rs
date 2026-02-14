@@ -45,16 +45,29 @@ impl Config {
 
     pub fn print_banner(&self) {
         tracing::info!("╔══════════════════════════════════════════════════╗");
-        tracing::info!("║           term-executor v{}              ║", env!("CARGO_PKG_VERSION"));
+        tracing::info!(
+            "║           term-executor v{}              ║",
+            env!("CARGO_PKG_VERSION")
+        );
         tracing::info!("╠══════════════════════════════════════════════════╣");
         tracing::info!("║  Port:              {:<28}║", self.port);
-        tracing::info!("║  Auth:              {:<28}║", if self.auth_token.is_some() { "enabled" } else { "disabled" });
+        tracing::info!(
+            "║  Auth:              {:<28}║",
+            if self.auth_token.is_some() {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
         tracing::info!("║  Max concurrent:    {:<28}║", self.max_concurrent_evals);
         tracing::info!("║  Session TTL:       {:<25}s ║", self.session_ttl_secs);
         tracing::info!("║  Clone timeout:     {:<25}s ║", self.clone_timeout_secs);
         tracing::info!("║  Agent timeout:     {:<25}s ║", self.agent_timeout_secs);
         tracing::info!("║  Test timeout:      {:<25}s ║", self.test_timeout_secs);
-        tracing::info!("║  Workspace:         {:<28}║", self.workspace_base.display());
+        tracing::info!(
+            "║  Workspace:         {:<28}║",
+            self.workspace_base.display()
+        );
         tracing::info!("╚══════════════════════════════════════════════════╝");
     }
 }

@@ -155,7 +155,12 @@ async fn run_eval(
         }
 
         let repo_dir = work_dir.join("repo");
-        clone_repo(&swe_task.workspace.repo, &repo_dir, config.clone_timeout_secs).await?;
+        clone_repo(
+            &swe_task.workspace.repo,
+            &repo_dir,
+            config.clone_timeout_secs,
+        )
+        .await?;
 
         if let Some(ref commit) = swe_task.workspace.base_commit {
             checkout_commit(&repo_dir, commit, config.clone_timeout_secs).await?;

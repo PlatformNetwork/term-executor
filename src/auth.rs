@@ -7,10 +7,7 @@ use axum::{
 use uuid::Uuid;
 
 #[allow(dead_code)]
-pub async fn auth_middleware(
-    request: Request,
-    next: Next,
-) -> Result<Response, StatusCode> {
+pub async fn auth_middleware(request: Request, next: Next) -> Result<Response, StatusCode> {
     let token = request
         .extensions()
         .get::<Option<String>>()
@@ -51,10 +48,9 @@ pub async fn auth_middleware(
 
 fn inject_request_id(response: &mut Response) {
     let id = Uuid::new_v4().to_string();
-    response.headers_mut().insert(
-        "x-request-id",
-        id.parse().unwrap(),
-    );
+    response
+        .headers_mut()
+        .insert("x-request-id", id.parse().unwrap());
 }
 
 /// Simple token check function for endpoints that check auth directly.

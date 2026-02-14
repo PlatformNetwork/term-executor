@@ -30,11 +30,18 @@ impl Metrics {
 
     pub fn finish_eval(&self, passed: Option<bool>, duration_ms: u64) {
         self.evals_active.fetch_sub(1, Ordering::Relaxed);
-        self.evals_duration_sum_ms.fetch_add(duration_ms, Ordering::Relaxed);
+        self.evals_duration_sum_ms
+            .fetch_add(duration_ms, Ordering::Relaxed);
         match passed {
-            Some(true) => { self.evals_passed.fetch_add(1, Ordering::Relaxed); }
-            Some(false) => { self.evals_failed.fetch_add(1, Ordering::Relaxed); }
-            None => { self.evals_failed.fetch_add(1, Ordering::Relaxed); }
+            Some(true) => {
+                self.evals_passed.fetch_add(1, Ordering::Relaxed);
+            }
+            Some(false) => {
+                self.evals_failed.fetch_add(1, Ordering::Relaxed);
+            }
+            None => {
+                self.evals_failed.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 

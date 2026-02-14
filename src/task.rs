@@ -104,7 +104,12 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
     // Load from tests/ directory
     let tests_dir = task_dir.join("tests");
     if tests_dir.exists() {
-        load_tests_recursive(&tests_dir, &tests_dir, &mut test_scripts, &mut test_source_files)?;
+        load_tests_recursive(
+            &tests_dir,
+            &tests_dir,
+            &mut test_scripts,
+            &mut test_source_files,
+        )?;
     }
 
     // Load from checks.txt (alternative flat format)
@@ -121,7 +126,10 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
             test_scripts.push((name, content));
         }
         if !test_scripts.is_empty() {
-            info!("Loaded {} test commands from checks.txt", test_scripts.len());
+            info!(
+                "Loaded {} test commands from checks.txt",
+                test_scripts.len()
+            );
         }
     }
 
@@ -227,12 +235,14 @@ version: "v2.31.0"
         std::fs::write(
             dir.join("workspace.yaml"),
             "repo: https://github.com/test/repo\nversion: v1.0\n",
-        ).unwrap();
+        )
+        .unwrap();
         std::fs::write(dir.join("prompt.md"), "Fix the bug").unwrap();
         std::fs::write(
             dir.join("checks.txt"),
             "# comment\npython -m pytest tests/\ncargo test\n",
-        ).unwrap();
+        )
+        .unwrap();
 
         let task = parse_task(dir).unwrap();
         assert_eq!(task.test_scripts.len(), 2);

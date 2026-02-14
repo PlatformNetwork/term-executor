@@ -70,7 +70,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join("session-test");
         tokio::fs::create_dir_all(&dir).await.unwrap();
-        tokio::fs::write(dir.join("file.txt"), "data").await.unwrap();
+        tokio::fs::write(dir.join("file.txt"), "data")
+            .await
+            .unwrap();
         assert!(dir.exists());
         remove_work_dir(&dir).await;
         assert!(!dir.exists());

@@ -128,10 +128,7 @@ async fn evaluate(
     }
 
     if payload.task_url.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "task_url is required".to_string(),
-        ));
+        return Err((StatusCode::BAD_REQUEST, "task_url is required".to_string()));
     }
 
     if payload.agent_code.is_empty() {
@@ -148,8 +145,7 @@ async fn evaluate(
             StatusCode::SERVICE_UNAVAILABLE,
             format!(
                 "At capacity ({}/{}). Try again later.",
-                state.config.max_concurrent_evals,
-                state.config.max_concurrent_evals
+                state.config.max_concurrent_evals, state.config.max_concurrent_evals
             ),
         ));
     }
@@ -208,9 +204,7 @@ struct EvalListEntry {
     created_at: String,
 }
 
-async fn list_evals(
-    State(state): State<Arc<AppState>>,
-) -> Json<Vec<EvalListEntry>> {
+async fn list_evals(State(state): State<Arc<AppState>>) -> Json<Vec<EvalListEntry>> {
     let sessions = state.sessions.list_sessions();
     Json(
         sessions
