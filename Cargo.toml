@@ -1,0 +1,59 @@
+[package]
+name = "term-executor"
+version = "0.1.0"
+edition = "2021"
+description = "Remote evaluation executor for term-challenge — runs on Basilica"
+authors = ["Platform Network"]
+license = "Apache-2.0"
+repository = "https://github.com/PlatformNetwork/term-executor"
+
+[[bin]]
+name = "term-executor"
+path = "src/main.rs"
+
+[dependencies]
+# Web framework
+axum = { version = "0.7", features = ["json"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full", "process"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# HTTP client (for downloading task zips)
+reqwest = { version = "0.12", features = ["json", "stream"] }
+
+# Utils
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+sha2 = "0.10"
+hex = "0.4"
+base64 = "0.22"
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Archive extraction
+flate2 = "1"
+tar = "0.4"
+zip = "2"
+
+# Temp files
+tempfile = "3"
+
+# Concurrency
+parking_lot = "0.12"
+dashmap = "6"
+
+[dev-dependencies]
+tokio-test = "0.4"
