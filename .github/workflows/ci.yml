@@ -74,7 +74,7 @@ jobs:
       - name: Build release
         run: cargo +nightly build --release -j $(nproc)
         env:
-          RUSTFLAGS: "-C debuginfo=0 -C target-cpu=native -C link-arg=-fuse-ld=mold -D warnings"
+          RUSTFLAGS: "-C debuginfo=0 -C link-arg=-fuse-ld=mold -D warnings"
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
