@@ -58,8 +58,5 @@ dashmap = "6"
 # Process / system
 libc = "0.2"
 
-# URL encoding
-urlencoding = "2"
-
 [dev-dependencies]
 tokio-test = "0.4"

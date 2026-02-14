@@ -25,8 +25,6 @@ pub struct Config {
     #[allow(dead_code)]
     pub max_output_bytes: usize,
     pub workspace_base: PathBuf,
-    pub basilica_api_token: Option<String>,
-    pub basilica_instance_name: Option<String>,
 }
 
 impl Config {
@@ -45,8 +43,6 @@ impl Config {
             workspace_base: PathBuf::from(
                 std::env::var("WORKSPACE_BASE").unwrap_or_else(|_| DEFAULT_WORKSPACE_BASE.into()),
             ),
-            basilica_api_token: std::env::var("BASILICA_API_TOKEN").ok(),
-            basilica_instance_name: std::env::var("BASILICA_INSTANCE_NAME").ok(),
         }
     }
 
@@ -63,20 +59,7 @@ impl Config {
         tracing::info!("║  Agent timeout:     {:<25}s ║", self.agent_timeout_secs);
         tracing::info!("║  Test timeout:      {:<25}s ║", self.test_timeout_secs);
         tracing::info!("║  Workspace:         {:<28}║", self.workspace_base.display());
-        tracing::info!("║  Basilica:          {:<28}║", if self.basilica_api_token.is_some() { "connected" } else { "standalone" });
         tracing::info!("╚══════════════════════════════════════════════════╝");
-
-        if self.basilica_instance_name.is_some() {
-            let name = self.basilica_instance_name.as_deref().unwrap();
-            tracing::info!("");
-            tracing::info!("Recommended Basilica deploy command:");
-            tracing::info!("  basilica deploy ghcr.io/platformnetwork/term-executor:latest \\");
-            tracing::info!("    --name {} \\", name);
-            tracing::info!("    --port {} \\", self.port);
-            tracing::info!("    --public-metadata \\");
-            tracing::info!("    --health-path /health \\");
-            tracing::info!("    --cpu 2 --memory 4Gi");
-        }
     }
 }
 

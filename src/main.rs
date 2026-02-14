@@ -1,5 +1,4 @@
 mod auth;
-mod basilica;
 mod cleanup;
 mod config;
 mod executor;
@@ -50,17 +49,6 @@ async fn main() {
 
     let app = handlers::router(state);
     let addr = format!("0.0.0.0:{}", config.port);
-
-    // Basilica enrollment (fire and forget)
-    if let (Some(ref token), Some(ref name)) =
-        (&config.basilica_api_token, &config.basilica_instance_name)
-    {
-        let token = token.clone();
-        let name = name.clone();
-        tokio::spawn(async move {
-            basilica::try_enroll_metadata(&token, &name).await;
-        });
-    }
 
     // Session reaper
     let sessions_reaper = sessions.clone();

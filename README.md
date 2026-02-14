@@ -183,8 +183,6 @@ All configuration is via environment variables:
 | `MAX_AGENT_CODE_BYTES` | `5242880` | Max agent code payload (5MB) |
 | `MAX_OUTPUT_BYTES` | `1048576` | Max captured output per command (1MB) |
 | `WORKSPACE_BASE` | `/tmp/sessions` | Base directory for session workspaces |
-| `BASILICA_API_TOKEN` | *(none)* | Basilica API token for metadata enrollment |
-| `BASILICA_INSTANCE_NAME` | *(none)* | Basilica deployment name for auto-enrollment |
 
 ## SWE-Forge Task Format
 
