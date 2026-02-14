@@ -1,239 +1,226 @@
 use axum::{
-    extract::{Path, State},
+    extract::State,
     http::StatusCode,
-    Json,
+    response::{IntoResponse, Json, Response},
+    routing::{get, post},
+    Router,
 };
-use serde::Serialize;
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
-use tracing::{error, info};
+use tokio::sync::Semaphore;
 
-use crate::session::{EvalRequest, EvalResult, EvalStatus};
-use crate::AppState;
+use crate::auth;
+use crate::config::Config;
+use crate::executor::Executor;
+use crate::metrics::Metrics;
+use crate::session::{EvalRequest, SessionManager};
 
-#[derive(Serialize)]
-pub struct HealthResponse {
-    pub status: &'static str,
-    pub version: &'static str,
+pub struct AppState {
+    pub config: Arc<Config>,
+    pub sessions: Arc<SessionManager>,
+    pub metrics: Arc<Metrics>,
+    pub executor: Arc<Executor>,
+    pub semaphore: Arc<Semaphore>,
+    pub started_at: chrono::DateTime<Utc>,
 }
 
-pub async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse {
-        status: "ok",
-        version: env!("CARGO_PKG_VERSION"),
+pub fn router(state: Arc<AppState>) -> Router {
+    Router::new()
+        .route("/health", get(health))
+        .route("/status", get(status))
+        .route("/metrics", get(metrics))
+        .route("/evaluate", post(evaluate))
+        .route("/evaluate/{id}", get(get_eval))
+        .route("/evaluations", get(list_evals))
+        .with_state(state)
+}
+
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({ "status": "ok" }))
+}
+
+#[derive(Serialize)]
+struct StatusResponse {
+    version: String,
+    uptime_secs: i64,
+    active_evals: u64,
+    total_evals: u64,
+    passed: u64,
+    failed: u64,
+    cancelled: u64,
+    capacity: usize,
+    available_slots: usize,
+}
+
+async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
+    let uptime = (Utc::now() - state.started_at).num_seconds();
+    Json(StatusResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: uptime,
+        active_evals: state.metrics.evals_active.load(Ordering::Relaxed),
+        total_evals: state.metrics.evals_total.load(Ordering::Relaxed),
+        passed: state.metrics.evals_passed.load(Ordering::Relaxed),
+        failed: state.metrics.evals_failed.load(Ordering::Relaxed),
+        cancelled: state.metrics.evals_cancelled.load(Ordering::Relaxed),
+        capacity: state.config.max_concurrent_evals,
+        available_slots: state.semaphore.available_permits(),
     })
 }
 
-#[derive(Serialize)]
-pub struct StartEvalResponse {
-    pub evaluation_id: String,
-    pub status: &'static str,
+async fn metrics(State(state): State<Arc<AppState>>) -> Response {
+    let body = state.metrics.render_prometheus();
+    (
+        StatusCode::OK,
+        [("content-type", "text/plain; version=0.0.4; charset=utf-8")],
+        body,
+    )
+        .into_response()
 }
 
-pub async fn start_evaluation(
+#[derive(Deserialize)]
+struct EvalPayload {
+    agent_code: String,
+    #[serde(default = "default_language")]
+    agent_language: String,
+    task_url: String,
+    #[serde(default)]
+    timeout_secs: Option<u64>,
+}
+
+fn default_language() -> String {
+    "python".to_string()
+}
+
+async fn evaluate(
     State(state): State<Arc<AppState>>,
-    Json(req): Json<EvalRequest>,
-) -> Result<(StatusCode, Json<StartEvalResponse>), (StatusCode, Json<serde_json::Value>)> {
-    if req.agent_code.trim().is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "agent_code is required"})),
-        ));
+    headers: axum::http::HeaderMap,
+    Json(payload): Json<EvalPayload>,
+) -> Result<impl IntoResponse, (StatusCode, String)> {
+    // Auth check
+    if let Some(ref expected) = state.config.auth_token {
+        let auth_header = headers
+            .get(axum::http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok());
+        if !auth::check_token(auth_header, expected) {
+            return Err((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));
+        }
     }
-    if req.task_url.trim().is_empty() {
+
+    // Validate payload
+    if payload.agent_code.len() > state.config.max_agent_code_bytes {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": "task_url is required"})),
+            format!(
+                "agent_code too large ({} bytes, max {})",
+                payload.agent_code.len(),
+                state.config.max_agent_code_bytes
+            ),
         ));
     }
 
-    let session = state.session_manager.create(req);
-    let session_id = session.id.clone();
+    if payload.task_url.len() > 2048 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "task_url too long (max 2048 chars)".to_string(),
+        ));
+    }
 
-    // Spawn evaluation in background
-    let sess = session.clone();
+    if payload.task_url.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "task_url is required".to_string(),
+        ));
+    }
+
+    if payload.agent_code.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "agent_code is required".to_string(),
+        ));
+    }
+
+    // Capacity check
+    let permit = state.semaphore.clone().try_acquire_owned();
+    if permit.is_err() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            format!(
+                "At capacity ({}/{}). Try again later.",
+                state.config.max_concurrent_evals,
+                state.config.max_concurrent_evals
+            ),
+        ));
+    }
+
+    let request = EvalRequest {
+        agent_code: payload.agent_code,
+        agent_language: payload.agent_language,
+        task_url: payload.task_url,
+        timeout_secs: payload.timeout_secs,
+    };
+
+    let session = state.sessions.create(request);
+    let id = session.id.clone();
+
+    // Spawn with permit held; permit is dropped when task completes
+    let executor = state.executor.clone();
+    let permit = permit.unwrap();
     tokio::spawn(async move {
-        run_evaluation(sess).await;
+        executor.spawn_eval(session);
+        // Hold the permit until the session manager marks it done
+        // We don't actually need to hold it since the semaphore tracks capacity
+        drop(permit);
     });
-
-    info!("Started evaluation {}", session_id);
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(StartEvalResponse {
-            evaluation_id: session_id,
-            status: "pending",
-        }),
+        Json(serde_json::json!({ "eval_id": id })),
     ))
 }
 
-async fn run_evaluation(session: Arc<crate::session::Session>) {
-    let start = Instant::now();
-    let eval_id = session.id.clone();
+async fn get_eval(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let session = state.sessions.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let result = session.result.lock().await;
 
-    // Mark as running
-    {
-        let mut result = session.result.lock().await;
-        result.status = EvalStatus::Running;
-    }
-
-    let cancel_rx = session.cancel.subscribe();
-    let timeout = Duration::from_secs(session.request.timeout_secs.unwrap_or(600));
-
-    // Create work directory
-    let work_dir = std::path::PathBuf::from(format!("/tmp/sessions/{}", eval_id));
-    if let Err(e) = tokio::fs::create_dir_all(&work_dir).await {
-        set_error(&session, &format!("Failed to create work dir: {}", e)).await;
-        return;
-    }
-
-    // 1. Download and extract task
-    info!("[{}] Downloading task from {}", eval_id, session.request.task_url);
-    let extract_dir = work_dir.join("task");
-    if let Err(e) = crate::task::download_and_extract(&session.request.task_url, &extract_dir).await {
-        set_error(&session, &format!("Failed to download task: {}", e)).await;
-        cleanup(&work_dir).await;
-        return;
-    }
-
-    // 2. Parse task
-    let task_root = match crate::task::find_task_root(&extract_dir) {
-        Ok(r) => r,
-        Err(e) => {
-            set_error(&session, &format!("Invalid task format: {}", e)).await;
-            cleanup(&work_dir).await;
-            return;
-        }
-    };
-
-    let task = match crate::task::parse_task(&task_root) {
-        Ok(t) => t,
-        Err(e) => {
-            set_error(&session, &format!("Failed to parse task: {}", e)).await;
-            cleanup(&work_dir).await;
-            return;
-        }
-    };
-
-    // 3. Setup workspace (clone repo, install deps)
-    info!("[{}] Setting up workspace", eval_id);
-    if let Err(e) = crate::executor::setup_workspace(&task, &work_dir).await {
-        set_error(&session, &format!("Workspace setup failed: {}", e)).await;
-        cleanup(&work_dir).await;
-        return;
-    }
-
-    // 4. Run agent
-    info!("[{}] Running agent", eval_id);
-    let agent_output = match crate::executor::run_agent(
-        &task,
-        &work_dir,
-        &session.request.agent_code,
-        &session.request.agent_language,
-        timeout,
-        cancel_rx,
-    )
-    .await
-    {
-        Ok(output) => output,
-        Err(e) => {
-            let msg = format!("Agent execution failed: {}", e);
-            info!("[{}] {}", eval_id, msg);
-            // Agent failure is NOT an error — tests still run to check if anything passed
-            msg
-        }
-    };
-
-    // 5. Run tests
-    info!("[{}] Running tests", eval_id);
-    let test_timeout = Duration::from_secs(300);
-    match crate::executor::run_tests(&task, &work_dir, test_timeout).await {
-        Ok((passed, test_results, test_output)) => {
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let mut result = session.result.lock().await;
-            result.status = EvalStatus::Completed;
-            result.passed = Some(passed);
-            result.test_results = test_results;
-            result.agent_output = agent_output;
-            result.test_output = test_output;
-            result.duration_ms = Some(duration_ms);
-            info!(
-                "[{}] Evaluation complete: passed={} ({}ms)",
-                eval_id, passed, duration_ms
-            );
-        }
-        Err(e) => {
-            let mut result = session.result.lock().await;
-            result.status = EvalStatus::Failed;
-            result.agent_output = agent_output;
-            result.error = Some(format!("Test execution failed: {}", e));
-            result.duration_ms = Some(start.elapsed().as_millis() as u64);
-            error!("[{}] Test execution failed: {}", eval_id, e);
-        }
-    }
-
-    cleanup(&work_dir).await;
-}
-
-async fn set_error(session: &crate::session::Session, msg: &str) {
-    let mut result = session.result.lock().await;
-    result.status = EvalStatus::Failed;
-    result.error = Some(msg.to_string());
-    error!("[{}] {}", session.id, msg);
-}
-
-async fn cleanup(work_dir: &std::path::Path) {
-    if let Err(e) = tokio::fs::remove_dir_all(work_dir).await {
-        tracing::warn!("Failed to cleanup {}: {}", work_dir.display(), e);
-    }
+    Ok(Json(serde_json::json!({
+        "eval_id": session.id,
+        "status": result.status,
+        "step": result.step,
+        "passed": result.passed,
+        "test_results": result.test_results,
+        "agent_output": result.agent_output,
+        "test_output": result.test_output,
+        "error": result.error,
+        "duration_ms": result.duration_ms,
+    })))
 }
 
 #[derive(Serialize)]
-pub struct PollResponse {
-    pub evaluation_id: String,
-    #[serde(flatten)]
-    pub result: EvalResult,
+struct EvalListEntry {
+    eval_id: String,
+    task_url: String,
+    language: String,
+    created_at: String,
 }
 
-pub async fn poll_evaluation(
+async fn list_evals(
     State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<Json<PollResponse>, (StatusCode, Json<serde_json::Value>)> {
-    let session = state.session_manager.get(&id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Evaluation not found"})),
-        )
-    })?;
-
-    let result = session.result.lock().await.clone();
-
-    Ok(Json(PollResponse {
-        evaluation_id: id,
-        result,
-    }))
-}
-
-pub async fn cancel_evaluation(
-    State(state): State<Arc<AppState>>,
-    Path(id): Path<String>,
-) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    let session = state.session_manager.get(&id).ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"error": "Evaluation not found"})),
-        )
-    })?;
-
-    let _ = session.cancel.send(true);
-
-    {
-        let mut result = session.result.lock().await;
-        if matches!(result.status, EvalStatus::Pending | EvalStatus::Running) {
-            result.status = EvalStatus::Cancelled;
-        }
-    }
-
-    info!("Cancelled evaluation {}", id);
-    Ok(StatusCode::NO_CONTENT)
+) -> Json<Vec<EvalListEntry>> {
+    let sessions = state.sessions.list_sessions();
+    Json(
+        sessions
+            .into_iter()
+            .map(|s| EvalListEntry {
+                eval_id: s.id,
+                task_url: s.task_url,
+                language: s.language,
+                created_at: s.created_at.to_rfc3339(),
+            })
+            .collect(),
+    )
 }

@@ -1,77 +1,99 @@
 mod auth;
+mod basilica;
+mod cleanup;
+mod config;
 mod executor;
 mod handlers;
+mod metrics;
+mod sandbox;
 mod session;
 mod task;
 
-use axum::{
-    middleware,
-    routing::{delete, get, post},
-    Router,
-};
 use std::sync::Arc;
-use tower_http::cors::CorsLayer;
-use tower_http::trace::TraceLayer;
+use tokio::sync::Semaphore;
 use tracing::info;
 
-pub struct AppState {
-    pub session_manager: session::SessionManager,
-    pub auth_token: Option<String>,
-}
-
 #[tokio::main]
-async fn main() -> anyhow::Result<()> {
+async fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,term_executor=debug".into()),
+            tracing_subscriber::EnvFilter::from_default_env()
+                .add_directive("term_executor=info".parse().unwrap()),
         )
         .init();
 
-    let port: u16 = std::env::var("PORT")
-        .ok()
-        .and_then(|p| p.parse().ok())
-        .unwrap_or(8080);
+    let config = Arc::new(config::Config::from_env());
+    config.print_banner();
 
-    let session_ttl_secs: u64 = std::env::var("SESSION_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(1800); // 30 min default
+    // Create workspace base directory
+    tokio::fs::create_dir_all(&config.workspace_base)
+        .await
+        .expect("Failed to create workspace directory");
 
-    let auth_token = std::env::var("AUTH_TOKEN").ok();
+    let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
+    let metrics_store = metrics::Metrics::new();
+    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_evals));
+    let executor = Arc::new(executor::Executor::new(
+        config.clone(),
+        sessions.clone(),
+        metrics_store.clone(),
+    ));
 
-    let state = Arc::new(AppState {
-        session_manager: session::SessionManager::new(session_ttl_secs),
-        auth_token,
+    let state = Arc::new(handlers::AppState {
+        config: config.clone(),
+        sessions: sessions.clone(),
+        metrics: metrics_store,
+        executor,
+        semaphore,
+        started_at: chrono::Utc::now(),
     });
 
-    // Spawn session reaper
-    let reaper_state = state.clone();
+    let app = handlers::router(state);
+    let addr = format!("0.0.0.0:{}", config.port);
+
+    // Basilica enrollment (fire and forget)
+    if let (Some(ref token), Some(ref name)) =
+        (&config.basilica_api_token, &config.basilica_instance_name)
+    {
+        let token = token.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+            basilica::try_enroll_metadata(&token, &name).await;
+        });
+    }
+
+    // Session reaper
+    let sessions_reaper = sessions.clone();
     tokio::spawn(async move {
-        reaper_state.session_manager.reaper_loop().await;
+        sessions_reaper.reaper_loop().await;
     });
 
-    let protected = Router::new()
-        .route("/evaluate", post(handlers::start_evaluation))
-        .route("/evaluate/{id}", get(handlers::poll_evaluation))
-        .route("/evaluate/{id}", delete(handlers::cancel_evaluation))
-        .route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            auth::auth_middleware,
-        ));
+    // Stale dir reaper
+    let workspace = config.workspace_base.clone();
+    let ttl = config.session_ttl_secs;
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
+        loop {
+            interval.tick().await;
+            cleanup::reap_stale_sessions(&workspace, ttl).await;
+        }
+    });
 
-    let app = Router::new()
-        .route("/health", get(handlers::health))
-        .merge(protected)
-        .layer(CorsLayer::permissive())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+    info!("Listening on {}", addr);
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
-    let addr = format!("0.0.0.0:{}", port);
-    info!("term-executor listening on {}", addr);
+    // Graceful shutdown on SIGTERM
+    let shutdown = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("Failed to install CTRL+C handler");
+        info!("Shutdown signal received, draining...");
+    };
 
-    let listener = tokio::net::TcpListener::bind(&addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown)
+        .await
+        .unwrap();
 
-    Ok(())
+    info!("Shutdown complete");
 }

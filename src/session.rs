@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tracing::info;
@@ -14,7 +15,7 @@ pub struct EvalRequest {
     pub timeout_secs: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum EvalStatus {
     Pending,
@@ -22,6 +23,19 @@ pub enum EvalStatus {
     Completed,
     Failed,
     Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalStep {
+    Queued,
+    DownloadingTask,
+    CloningRepo,
+    InstallingDeps,
+    RunningAgent,
+    RunningTests,
+    Cleanup,
+    Done,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -35,6 +49,7 @@ pub struct TaskTestResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalResult {
     pub status: EvalStatus,
+    pub step: EvalStep,
     pub passed: Option<bool>,
     pub test_results: Vec<TaskTestResult>,
     pub agent_output: String,
@@ -51,9 +66,31 @@ pub struct Session {
     pub cancel: tokio::sync::watch::Sender<bool>,
 }
 
+#[allow(dead_code)]
+pub struct SessionStats {
+    pub created: AtomicU64,
+    pub active: AtomicU64,
+    pub completed: AtomicU64,
+    pub failed: AtomicU64,
+    pub cancelled: AtomicU64,
+}
+
+impl SessionStats {
+    pub fn new() -> Self {
+        Self {
+            created: AtomicU64::new(0),
+            active: AtomicU64::new(0),
+            completed: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
+            cancelled: AtomicU64::new(0),
+        }
+    }
+}
+
 pub struct SessionManager {
     sessions: DashMap<String, Arc<Session>>,
     ttl_secs: u64,
+    pub stats: SessionStats,
 }
 
 impl SessionManager {
@@ -61,6 +98,7 @@ impl SessionManager {
         Self {
             sessions: DashMap::new(),
             ttl_secs,
+            stats: SessionStats::new(),
         }
     }
 
@@ -73,6 +111,7 @@ impl SessionManager {
             request,
             result: Arc::new(Mutex::new(EvalResult {
                 status: EvalStatus::Pending,
+                step: EvalStep::Queued,
                 passed: None,
                 test_results: Vec::new(),
                 agent_output: String::new(),
@@ -85,6 +124,8 @@ impl SessionManager {
         });
 
         self.sessions.insert(id, session.clone());
+        self.stats.created.fetch_add(1, Ordering::Relaxed);
+        self.stats.active.fetch_add(1, Ordering::Relaxed);
         session
     }
 
@@ -92,8 +133,45 @@ impl SessionManager {
         self.sessions.get(id).map(|s| s.value().clone())
     }
 
+    #[allow(dead_code)]
     pub fn remove(&self, id: &str) -> Option<Arc<Session>> {
         self.sessions.remove(id).map(|(_, s)| s)
+    }
+
+    #[allow(dead_code)]
+    pub fn active_count(&self) -> usize {
+        self.stats.active.load(Ordering::Relaxed) as usize
+    }
+
+    pub fn list_sessions(&self) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .map(|entry| {
+                let s = entry.value();
+                SessionSummary {
+                    id: s.id.clone(),
+                    task_url: s.request.task_url.clone(),
+                    language: s.request.agent_language.clone(),
+                    created_at: s.created_at,
+                }
+            })
+            .collect()
+    }
+
+    pub fn mark_completed(&self) {
+        self.stats.active.fetch_sub(1, Ordering::Relaxed);
+        self.stats.completed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn mark_failed(&self) {
+        self.stats.active.fetch_sub(1, Ordering::Relaxed);
+        self.stats.failed.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[allow(dead_code)]
+    pub fn mark_cancelled(&self) {
+        self.stats.active.fetch_sub(1, Ordering::Relaxed);
+        self.stats.cancelled.fetch_add(1, Ordering::Relaxed);
     }
 
     pub async fn reaper_loop(&self) {
@@ -118,4 +196,12 @@ impl SessionManager {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionSummary {
+    pub id: String,
+    pub task_url: String,
+    pub language: String,
+    pub created_at: DateTime<Utc>,
 }

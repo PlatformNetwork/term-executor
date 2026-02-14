@@ -1,46 +1,91 @@
 use axum::{
-    body::Body,
-    extract::State,
-    http::{Request, StatusCode},
+    extract::Request,
+    http::{header, StatusCode},
     middleware::Next,
-    response::{IntoResponse, Response},
-    Json,
+    response::Response,
 };
-use std::sync::Arc;
+use uuid::Uuid;
 
-use crate::AppState;
-
+#[allow(dead_code)]
 pub async fn auth_middleware(
-    State(state): State<Arc<AppState>>,
-    req: Request<Body>,
+    request: Request,
     next: Next,
-) -> Response {
-    let Some(expected) = &state.auth_token else {
-        return next.run(req).await;
+) -> Result<Response, StatusCode> {
+    let token = request
+        .extensions()
+        .get::<Option<String>>()
+        .cloned()
+        .flatten();
+
+    let Some(expected_token) = token else {
+        // No auth configured → pass through
+        let mut response = next.run(request).await;
+        inject_request_id(&mut response);
+        return Ok(response);
     };
 
-    let auth_header = req
+    let auth_header = request
         .headers()
-        .get("authorization")
+        .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok());
 
     match auth_header {
-        Some(header) if header.starts_with("Bearer ") => {
-            let token = &header[7..];
-            if token == expected {
-                next.run(req).await
-            } else {
-                (
-                    StatusCode::UNAUTHORIZED,
-                    Json(serde_json::json!({"error": "Invalid token"})),
-                )
-                    .into_response()
-            }
+        Some(h) if h.strip_prefix("Bearer ").unwrap_or(h) == expected_token => {
+            let mut response = next.run(request).await;
+            inject_request_id(&mut response);
+            Ok(response)
         }
-        _ => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({"error": "Missing Authorization: Bearer <token> header"})),
-        )
-            .into_response(),
+        _ => {
+            tracing::warn!(
+                "Auth failed from {}",
+                request
+                    .headers()
+                    .get("x-forwarded-for")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or("unknown")
+            );
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
+fn inject_request_id(response: &mut Response) {
+    let id = Uuid::new_v4().to_string();
+    response.headers_mut().insert(
+        "x-request-id",
+        id.parse().unwrap(),
+    );
+}
+
+/// Simple token check function for endpoints that check auth directly.
+pub fn check_token(auth_header: Option<&str>, expected: &str) -> bool {
+    match auth_header {
+        Some(h) => h.strip_prefix("Bearer ").unwrap_or(h) == expected,
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_check_token_bearer() {
+        assert!(check_token(Some("Bearer secret123"), "secret123"));
+    }
+
+    #[test]
+    fn test_check_token_raw() {
+        assert!(check_token(Some("secret123"), "secret123"));
+    }
+
+    #[test]
+    fn test_check_token_wrong() {
+        assert!(!check_token(Some("Bearer wrong"), "secret123"));
+    }
+
+    #[test]
+    fn test_check_token_missing() {
+        assert!(!check_token(None, "secret123"));
     }
 }

@@ -1,338 +1,383 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use std::path::Path;
-use std::time::{Duration, Instant};
-use tokio::process::Command;
-use tracing::{debug, info, warn};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::watch::Receiver;
+use tracing::{debug, error, info, warn};
 
-use crate::session::TaskTestResult;
-use crate::task::SweForgeTask;
+use crate::config::Config;
+use crate::metrics::Metrics;
+use crate::sandbox;
+use crate::session::{
+    EvalRequest, EvalResult, EvalStatus, EvalStep, Session, SessionManager, TaskTestResult,
+};
+use crate::task;
 
-const DEFAULT_CMD_TIMEOUT: Duration = Duration::from_secs(300);
-const CLONE_TIMEOUT: Duration = Duration::from_secs(120);
-
-pub struct ExecOutput {
-    pub stdout: String,
-    pub stderr: String,
-    pub exit_code: i32,
+pub struct Executor {
+    config: Arc<Config>,
+    sessions: Arc<SessionManager>,
+    metrics: Arc<Metrics>,
 }
 
-async fn run_cmd(
-    cmd: &str,
-    args: &[&str],
-    cwd: &Path,
-    timeout: Duration,
-    env: Option<&[(&str, &str)]>,
-) -> Result<ExecOutput> {
-    let mut command = Command::new(cmd);
-    command.args(args).current_dir(cwd);
-
-    if let Some(env_vars) = env {
-        for (k, v) in env_vars {
-            command.env(k, v);
+impl Executor {
+    pub fn new(config: Arc<Config>, sessions: Arc<SessionManager>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            config,
+            sessions,
+            metrics,
         }
     }
 
-    let output = tokio::time::timeout(timeout, command.output())
-        .await
-        .context("Command timed out")?
-        .context("Failed to execute command")?;
+    pub fn spawn_eval(&self, session: Arc<Session>) {
+        let config = self.config.clone();
+        let sessions = self.sessions.clone();
+        let metrics = self.metrics.clone();
+        let cancel_rx = session.cancel.subscribe();
 
-    Ok(ExecOutput {
-        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-        exit_code: output.status.code().unwrap_or(-1),
-    })
+        tokio::spawn(async move {
+            let start = std::time::Instant::now();
+            metrics.start_eval();
+
+            let result = run_eval(&config, &session, cancel_rx).await;
+            let duration_ms = start.elapsed().as_millis() as u64;
+
+            let mut res = session.result.lock().await;
+            match result {
+                Ok(eval) => {
+                    let passed = eval.passed;
+                    *res = eval;
+                    res.duration_ms = Some(duration_ms);
+                    metrics.finish_eval(passed, duration_ms);
+                    if passed.unwrap_or(false) {
+                        sessions.mark_completed();
+                    } else {
+                        sessions.mark_failed();
+                    }
+                }
+                Err(e) => {
+                    error!("Evaluation {} failed: {:#}", session.id, e);
+                    res.status = EvalStatus::Failed;
+                    res.step = EvalStep::Done;
+                    res.error = Some(format!("{:#}", e));
+                    res.duration_ms = Some(duration_ms);
+                    metrics.finish_eval(None, duration_ms);
+                    sessions.mark_failed();
+                }
+            }
+        });
+    }
 }
 
-pub async fn setup_workspace(task: &SweForgeTask, work_dir: &Path) -> Result<()> {
-    let repo_dir = work_dir.join("repo");
-    tokio::fs::create_dir_all(&repo_dir)
-        .await
-        .context("Failed to create repo dir")?;
+async fn run_eval(
+    config: &Config,
+    session: &Session,
+    cancel_rx: Receiver<bool>,
+) -> Result<EvalResult> {
+    let work_dir = config.workspace_base.join(&session.id);
+    tokio::fs::create_dir_all(&work_dir).await?;
 
-    // Clone repo at specified version
-    info!("Cloning {} @ {}", task.workspace.repo, task.workspace.version);
-    let clone_result = run_cmd(
-        "git",
-        &[
-            "clone",
-            "--depth",
-            "1",
-            "--branch",
-            &task.workspace.version,
-            &task.workspace.repo,
-            ".",
-        ],
-        &repo_dir,
-        CLONE_TIMEOUT,
-        None,
-    )
-    .await;
-
-    match clone_result {
-        Ok(out) if out.exit_code == 0 => {
-            debug!("Clone succeeded");
+    let result = async {
+        // 1. Download task
+        set_step(session, EvalStep::DownloadingTask).await;
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
         }
-        Ok(out) => {
-            // Tag clone failed, try full clone + checkout
-            warn!(
-                "Shallow clone failed (exit {}), trying full clone",
-                out.exit_code
+
+        let task_dir = work_dir.join("task");
+        task::download_and_extract(&session.request.task_url, &task_dir).await?;
+        let task_root = task::find_task_root(&task_dir)?;
+        let swe_task = task::parse_task(&task_root)?;
+
+        // 2. Clone repository
+        set_step(session, EvalStep::CloningRepo).await;
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        let repo_dir = work_dir.join("repo");
+        clone_repo(&swe_task.workspace.repo, &repo_dir, config.clone_timeout_secs).await?;
+
+        if let Some(ref commit) = swe_task.workspace.base_commit {
+            checkout_commit(&repo_dir, commit, config.clone_timeout_secs).await?;
+        }
+
+        // Check disk quota
+        if !sandbox::check_disk_quota(&work_dir, config.disk_quota_mb).await? {
+            anyhow::bail!(
+                "Disk quota exceeded (max {}MB)",
+                config.disk_quota_mb
             );
-            let _ = tokio::fs::remove_dir_all(&repo_dir).await;
-            tokio::fs::create_dir_all(&repo_dir).await?;
+        }
 
-            let full = run_cmd(
-                "git",
-                &["clone", &task.workspace.repo, "."],
-                &repo_dir,
-                CLONE_TIMEOUT,
-                None,
-            )
-            .await?;
+        // 3. Install dependencies
+        set_step(session, EvalStep::InstallingDeps).await;
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
 
-            if full.exit_code != 0 {
-                anyhow::bail!("Git clone failed: {}", full.stderr);
-            }
-
-            let checkout = run_cmd(
-                "git",
-                &["checkout", &task.workspace.version],
-                &repo_dir,
-                Duration::from_secs(30),
-                None,
-            )
-            .await?;
-
-            if checkout.exit_code != 0 {
-                anyhow::bail!("Git checkout failed: {}", checkout.stderr);
+        if let Some(ref install_cmds) = swe_task.workspace.install {
+            for cmd in install_cmds {
+                info!("Running install command: {}", cmd);
+                let out = sandbox::shell(
+                    cmd,
+                    &repo_dir,
+                    Duration::from_secs(config.clone_timeout_secs),
+                    None,
+                )
+                .await?;
+                if out.exit_code != 0 {
+                    warn!("Install command failed (exit {}): {}", out.exit_code, &out.stderr[..out.stderr.len().min(500)]);
+                }
             }
         }
-        Err(e) => return Err(e),
-    }
 
-    // If base_commit specified, reset to it
-    if let Some(ref base) = task.workspace.base_commit {
-        info!("Resetting to base commit {}", base);
-        let reset = run_cmd(
-            "git",
-            &["reset", "--hard", base],
+        // 4. Write + run agent code
+        set_step(session, EvalStep::RunningAgent).await;
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        let agent_output = run_agent(
+            &session.request,
+            &swe_task.prompt,
             &repo_dir,
-            Duration::from_secs(30),
-            None,
+            config.agent_timeout_secs,
         )
         .await?;
-        if reset.exit_code != 0 {
-            anyhow::bail!("Git reset to base commit failed: {}", reset.stderr);
-        }
-    }
 
-    // Run install commands
-    if let Some(ref install_cmds) = task.workspace.install {
-        for cmd in install_cmds {
-            info!("Running install: {}", cmd);
-            let result = run_cmd("sh", &["-c", cmd], &repo_dir, DEFAULT_CMD_TIMEOUT, None).await?;
-            if result.exit_code != 0 {
-                warn!("Install command failed (exit {}): {}", result.exit_code, result.stderr);
+        // 5. Write test source files
+        for (name, content) in &swe_task.test_source_files {
+            let dest = repo_dir.join(name);
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
             }
+            tokio::fs::write(&dest, content).await?;
         }
-    }
 
-    // Write test source files into repo
-    let tests_dir = repo_dir.join("__tests__");
-    tokio::fs::create_dir_all(&tests_dir).await?;
-    for (fname, content) in &task.test_source_files {
-        let path = tests_dir.join(fname);
-        tokio::fs::write(&path, content).await?;
+        // 6. Run tests
+        set_step(session, EvalStep::RunningTests).await;
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        let test_results = run_tests(
+            &swe_task.test_scripts,
+            &repo_dir,
+            config.test_timeout_secs,
+        )
+        .await?;
+
+        let all_passed = test_results.iter().all(|t| t.passed);
+        let test_output_combined = test_results
+            .iter()
+            .map(|t| format!("=== {} (exit {}) ===\n{}\n{}", t.name, t.exit_code, t.output, if t.passed { "PASS" } else { "FAIL" }))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        Ok(EvalResult {
+            status: EvalStatus::Completed,
+            step: EvalStep::Done,
+            passed: Some(all_passed),
+            test_results,
+            agent_output,
+            test_output: test_output_combined,
+            error: None,
+            duration_ms: None,
+        })
+    }
+    .await;
+
+    // Cleanup
+    set_step(session, EvalStep::Cleanup).await;
+    crate::cleanup::remove_work_dir(&work_dir).await;
+
+    result
+}
+
+async fn set_step(session: &Session, step: EvalStep) {
+    let mut res = session.result.lock().await;
+    res.step = step;
+    if res.status == EvalStatus::Pending {
+        res.status = EvalStatus::Running;
+    }
+}
+
+async fn clone_repo(repo_url: &str, dest: &Path, timeout_secs: u64) -> Result<()> {
+    info!("Cloning {} → {}", repo_url, dest.display());
+    let tmp = dest.parent().unwrap_or(Path::new("/tmp"));
+
+    let cmd = format!(
+        "git clone --depth 50 --single-branch {} {}",
+        shell_escape(repo_url),
+        shell_escape(&dest.to_string_lossy())
+    );
+
+    let out = sandbox::shell(&cmd, tmp, Duration::from_secs(timeout_secs), None).await?;
+
+    if out.exit_code != 0 {
+        anyhow::bail!("git clone failed (exit {}): {}", out.exit_code, out.stderr);
     }
 
     Ok(())
 }
 
-pub async fn run_agent(
-    task: &SweForgeTask,
-    work_dir: &Path,
-    agent_code: &str,
-    agent_language: &str,
-    timeout: Duration,
-    mut cancel_rx: tokio::sync::watch::Receiver<bool>,
-) -> Result<String> {
-    let repo_dir = work_dir.join("repo");
-    let agent_dir = work_dir.join("agent");
-    tokio::fs::create_dir_all(&agent_dir).await?;
-
-    // Write agent code
-    let agent_file = match agent_language {
-        "python" | "py" => "agent.py",
-        "typescript" | "ts" => "agent.ts",
-        "javascript" | "js" => "agent.js",
-        "rust" | "rs" => "agent.rs",
-        "go" => "agent.go",
-        _ => "agent.py",
-    };
-    let agent_path = agent_dir.join(agent_file);
-    tokio::fs::write(&agent_path, agent_code).await?;
-
-    // Write the prompt as instruction file for the agent
-    let instruction_path = work_dir.join("instruction.md");
-    tokio::fs::write(&instruction_path, &task.prompt).await?;
-
-    // Run the agent
-    info!("Running agent ({}, timeout={}s)", agent_language, timeout.as_secs());
-    let run_cmd_str = match agent_language {
-        "python" | "py" => format!("cd {} && python3 -B {}", repo_dir.display(), agent_path.display()),
-        "typescript" | "ts" => format!("cd {} && npx tsx {}", repo_dir.display(), agent_path.display()),
-        "javascript" | "js" => format!("cd {} && node {}", repo_dir.display(), agent_path.display()),
-        _ => format!("cd {} && python3 -B {}", repo_dir.display(), agent_path.display()),
-    };
-
-    let env_vars = [
-        ("INSTRUCTION_FILE", instruction_path.to_str().unwrap_or("")),
-        ("REPO_DIR", repo_dir.to_str().unwrap_or("")),
-        ("WORK_DIR", work_dir.to_str().unwrap_or("")),
-    ];
-
-    let mut cmd = tokio::process::Command::new("sh");
-    cmd.arg("-c")
-        .arg(&run_cmd_str)
-        .current_dir(&repo_dir);
-
-    for (k, v) in &env_vars {
-        cmd.env(k, v);
+async fn checkout_commit(repo_dir: &Path, commit: &str, timeout_secs: u64) -> Result<()> {
+    info!("Checking out commit {}", commit);
+    let cmd = format!("git checkout {}", shell_escape(commit));
+    let out = sandbox::shell(&cmd, repo_dir, Duration::from_secs(timeout_secs), None).await?;
+    if out.exit_code != 0 {
+        warn!("git checkout {} failed: {}", commit, &out.stderr[..out.stderr.len().min(300)]);
     }
-
-    let start = Instant::now();
-    let child = cmd.stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .context("Failed to spawn agent process")?;
-
-    let output = tokio::select! {
-        result = child.wait_with_output() => {
-            result.context("Agent process failed")?
-        }
-        _ = cancel_rx.changed() => {
-            anyhow::bail!("Evaluation cancelled");
-        }
-        _ = tokio::time::sleep(timeout) => {
-            anyhow::bail!("Agent timed out after {}s", timeout.as_secs());
-        }
-    };
-
-    let agent_output = format!(
-        "=== STDOUT ===\n{}\n=== STDERR ===\n{}\n=== EXIT: {} ({}ms) ===",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr),
-        output.status.code().unwrap_or(-1),
-        start.elapsed().as_millis()
-    );
-
-    Ok(agent_output)
+    Ok(())
 }
 
-pub async fn run_tests(
-    task: &SweForgeTask,
-    work_dir: &Path,
-    timeout: Duration,
-) -> Result<(bool, Vec<TaskTestResult>, String)> {
-    let repo_dir = work_dir.join("repo");
-    let tests_dir = repo_dir.join("__tests__");
+fn agent_extension(language: &str) -> &str {
+    match language.to_lowercase().as_str() {
+        "python" | "py" => ".py",
+        "javascript" | "js" | "node" => ".js",
+        "typescript" | "ts" => ".ts",
+        "rust" | "rs" => ".rs",
+        "go" | "golang" => ".go",
+        "ruby" | "rb" => ".rb",
+        "shell" | "bash" | "sh" => ".sh",
+        _ => ".sh",
+    }
+}
 
-    let mut all_passed = true;
-    let mut results = Vec::new();
-    let mut combined_output = String::new();
+fn agent_runner(language: &str, script_path: &str) -> String {
+    match language.to_lowercase().as_str() {
+        "python" | "py" => format!("python3 {}", script_path),
+        "javascript" | "js" | "node" => format!("node {}", script_path),
+        "typescript" | "ts" => format!("npx tsx {}", script_path),
+        "rust" | "rs" => format!("rustc {} -o /tmp/agent && /tmp/agent", script_path),
+        "go" | "golang" => format!("go run {}", script_path),
+        "ruby" | "rb" => format!("ruby {}", script_path),
+        _ => format!("bash {}", script_path),
+    }
+}
 
-    if task.test_scripts.is_empty() {
-        anyhow::bail!("No test scripts found in task");
+async fn run_agent(
+    request: &EvalRequest,
+    prompt: &str,
+    repo_dir: &Path,
+    timeout_secs: u64,
+) -> Result<String> {
+    let ext = agent_extension(&request.agent_language);
+    let script_name = format!("_agent_code{}", ext);
+    let script_path = repo_dir.join(&script_name);
+    tokio::fs::write(&script_path, &request.agent_code).await?;
+
+    let prompt_path = repo_dir.join("_task_prompt.md");
+    tokio::fs::write(&prompt_path, prompt).await?;
+
+    let run_cmd = agent_runner(&request.agent_language, &script_name);
+    info!("Running agent: {}", run_cmd);
+
+    let env_vars = [
+        ("TASK_PROMPT", prompt_path.to_string_lossy().to_string()),
+        ("REPO_DIR", repo_dir.to_string_lossy().to_string()),
+    ];
+    let env_refs: Vec<(&str, &str)> = env_vars
+        .iter()
+        .map(|(k, v)| (*k, v.as_str()))
+        .collect();
+
+    let out = sandbox::shell(
+        &run_cmd,
+        repo_dir,
+        Duration::from_secs(timeout_secs),
+        Some(&env_refs),
+    )
+    .await?;
+
+    if out.exit_code != 0 {
+        warn!("Agent exited with code {}", out.exit_code);
     }
 
-    for (script_name, script_content) in &task.test_scripts {
-        info!("Running test: {}", script_name);
+    let combined = format!("{}\n{}", out.stdout, out.stderr);
+    Ok(combined)
+}
 
-        // Write test script
-        let script_path = tests_dir.join(script_name);
-        tokio::fs::write(&script_path, script_content).await?;
+async fn run_tests(
+    scripts: &[(String, String)],
+    repo_dir: &Path,
+    timeout_secs: u64,
+) -> Result<Vec<TaskTestResult>> {
+    let mut results = Vec::new();
+
+    for (name, content) in scripts {
+        let script_path = repo_dir.join(name);
+        if let Some(parent) = script_path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&script_path, content).await?;
 
         // Make executable
-        run_cmd("chmod", &["+x", script_path.to_str().unwrap_or("")], &repo_dir, Duration::from_secs(5), None).await?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let perms = std::fs::Permissions::from_mode(0o755);
+            let _ = std::fs::set_permissions(&script_path, perms);
+        }
 
-        // Run test
-        let result = run_cmd(
-            "sh",
-            &[script_path.to_str().unwrap_or("")],
-            &repo_dir,
-            timeout,
-            Some(&[
-                ("REPO_DIR", repo_dir.to_str().unwrap_or("")),
-                ("TESTS_DIR", tests_dir.to_str().unwrap_or("")),
-            ]),
+        debug!("Running test script: {}", name);
+        let out = sandbox::shell(
+            &format!("bash {}", shell_escape(&script_path.to_string_lossy())),
+            repo_dir,
+            Duration::from_secs(timeout_secs),
+            None,
         )
         .await;
 
-        let (passed, output, exit_code) = match result {
-            Ok(out) => {
-                let passed = out.exit_code == 0;
-                let output = format!("{}\n{}", out.stdout, out.stderr);
-                (passed, output, out.exit_code)
+        match out {
+            Ok(o) => {
+                results.push(TaskTestResult {
+                    name: name.clone(),
+                    passed: o.exit_code == 0,
+                    output: format!("{}\n{}", o.stdout, o.stderr),
+                    exit_code: o.exit_code,
+                });
             }
             Err(e) => {
-                let output = format!("Test execution error: {}", e);
-                (false, output, -1)
+                results.push(TaskTestResult {
+                    name: name.clone(),
+                    passed: false,
+                    output: format!("Error: {:#}", e),
+                    exit_code: -1,
+                });
             }
-        };
-
-        if !passed {
-            all_passed = false;
         }
-
-        combined_output.push_str(&format!("=== {} (exit {}) ===\n{}\n", script_name, exit_code, output));
-
-        results.push(TaskTestResult {
-            name: script_name.clone(),
-            passed,
-            output,
-            exit_code,
-        });
     }
 
-    Ok((all_passed, results, combined_output))
+    Ok(results)
+}
+
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
 
-    #[tokio::test]
-    async fn test_run_cmd_echo() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = run_cmd("echo", &["hello"], tmp.path(), Duration::from_secs(5), None)
-            .await
-            .unwrap();
-        assert_eq!(result.exit_code, 0);
-        assert!(result.stdout.trim().contains("hello"));
+    #[test]
+    fn test_agent_extension() {
+        assert_eq!(agent_extension("python"), ".py");
+        assert_eq!(agent_extension("js"), ".js");
+        assert_eq!(agent_extension("rust"), ".rs");
+        assert_eq!(agent_extension("go"), ".go");
+        assert_eq!(agent_extension("unknown"), ".sh");
     }
 
-    #[tokio::test]
-    async fn test_run_cmd_timeout() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = run_cmd(
-            "sleep",
-            &["10"],
-            tmp.path(),
-            Duration::from_millis(100),
-            None,
-        )
-        .await;
-        assert!(result.is_err());
+    #[test]
+    fn test_agent_runner() {
+        assert!(agent_runner("python", "agent.py").contains("python3"));
+        assert!(agent_runner("js", "agent.js").contains("node"));
     }
 
-    #[tokio::test]
-    async fn test_run_cmd_failure() {
-        let tmp = tempfile::tempdir().unwrap();
-        let result = run_cmd("false", &[], tmp.path(), Duration::from_secs(5), None)
-            .await
-            .unwrap();
-        assert_ne!(result.exit_code, 0);
+    #[test]
+    fn test_shell_escape() {
+        assert_eq!(shell_escape("hello world"), "'hello world'");
+        assert_eq!(shell_escape("it's"), "'it'\\''s'");
     }
 }
