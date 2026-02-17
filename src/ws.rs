@@ -66,9 +66,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
     drop(current_state);
 
     if sender
-        .send(Message::Text(
-            serde_json::to_string(&snapshot).unwrap(),
-        ))
+        .send(Message::Text(serde_json::to_string(&snapshot).unwrap()))
         .await
         .is_err()
     {
@@ -98,9 +96,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                         "batch_id": batch_id_send,
                     });
                     let _ = sender
-                        .send(Message::Text(
-                            serde_json::to_string(&close_msg).unwrap(),
-                        ))
+                        .send(Message::Text(serde_json::to_string(&close_msg).unwrap()))
                         .await;
                     break;
                 }

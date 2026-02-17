@@ -100,9 +100,7 @@ fn find_archive_root(base: &Path) -> Result<PathBuf> {
     for entry in std::fs::read_dir(base).context("Failed to read extracted directory")? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir()
-            && (path.join("tasks").exists() || path.join("agent_code").exists())
-        {
+        if path.is_dir() && (path.join("tasks").exists() || path.join("agent_code").exists()) {
             return Ok(path);
         }
     }
