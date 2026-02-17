@@ -1,0 +1,39 @@
+#!/bin/bash
+set -e
+
+# Skip hooks if SKIP_GIT_HOOKS=1 is set
+if [ "${SKIP_GIT_HOOKS:-0}" = "1" ]; then
+    echo "[pre-push] Skipped (SKIP_GIT_HOOKS=1)"
+    exit 0
+fi
+
+echo "╔══════════════════════════════════════╗"
+echo "║        pre-push quality gate         ║"
+echo "╚══════════════════════════════════════╝"
+
+# 1. Format check
+echo ""
+echo "▶ Checking formatting (cargo +nightly fmt)..."
+cargo +nightly fmt --all -- --check
+echo "  ✓ Formatting OK"
+
+# 2. Clippy lint
+echo ""
+echo "▶ Running clippy..."
+cargo +nightly clippy --all-targets -- -D warnings
+echo "  ✓ Clippy OK"
+
+# 3. Tests
+echo ""
+echo "▶ Running tests..."
+cargo +nightly test --release -- --test-threads=$(nproc 2>/dev/null || echo 4)
+echo "  ✓ Tests OK"
+
+# 4. Release build
+echo ""
+echo "▶ Building release binary..."
+cargo +nightly build --release
+echo "  ✓ Build OK"
+
+echo ""
+echo "✅ pre-push passed — safe to push"
