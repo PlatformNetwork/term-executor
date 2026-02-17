@@ -12,7 +12,7 @@ This is a **single-crate Rust binary** (`term-executor`) built with Axum. There 
 
 ```
 Client → POST /submit (multipart archive) → term-executor
-  1. Authenticate via X-Hotkey header (SS58 hotkey)
+  1. Authenticate via X-Hotkey, X-Nonce, X-Signature, X-Api-Key headers
   2. Extract uploaded archive (zip/tar.gz) containing tasks/ and agent_code/
   3. Parse each task: workspace.yaml, prompt.md, tests/
   4. For each task (concurrently, up to limit):
@@ -33,7 +33,7 @@ Client → POST /submit (multipart archive) → term-executor
 | `src/main.rs` | Entry point — bootstraps config, session manager, executor, Axum server, reaper tasks |
 | `src/config.rs` | `Config` struct loaded from environment variables with defaults; `AUTHORIZED_HOTKEY` constant |
 | `src/handlers.rs` | Axum route handlers: `/health`, `/status`, `/metrics`, `/submit`, `/batch/{id}`, `/batch/{id}/tasks`, `/batch/{id}/task/{task_id}`, `/batches` |
-| `src/auth.rs` | Hotkey authentication: `extract_hotkey()`, `verify_hotkey()`, `validate_ss58()` |
+| `src/auth.rs` | Authentication: `extract_auth_headers()`, `verify_request()`, `validate_ss58()`, sr25519 signature verification via `verify_sr25519_signature()`, `NonceStore` for replay protection, `AuthHeaders`/`AuthError` types |
 | `src/executor.rs` | Core evaluation engine — spawns batch tasks that clone repos, run agents, run tests concurrently |
 | `src/session.rs` | `SessionManager` with `DashMap`, `Batch`, `BatchResult`, `TaskResult`, `BatchStatus`, `TaskStatus`, `WsEvent` types |
 | `src/task.rs` | Archive extraction (zip/tar.gz), task directory parsing, agent code loading, language detection |
@@ -43,7 +43,7 @@ Client → POST /submit (multipart archive) → term-executor
 
 ### Key Shared State (via `Arc`)
 
-- `AppState` (in `handlers.rs`) holds `Config`, `SessionManager`, `Metrics`, `Executor`, `started_at`
+- `AppState` (in `handlers.rs`) holds `Config`, `SessionManager`, `Metrics`, `Executor`, `NonceStore`, `started_at`
 - `SessionManager` uses `DashMap<String, Arc<Batch>>` for lock-free concurrent access
 - Per-batch `Semaphore` in `executor.rs` controls concurrent tasks within a batch (configurable, default: 8)
 - `broadcast::Sender<WsEvent>` per batch for WebSocket event streaming
@@ -59,7 +59,7 @@ Client → POST /submit (multipart archive) → term-executor
 - **Archive Handling**: `flate2` + `tar` (tar.gz), `zip` 2 (zip)
 - **Error Handling**: `anyhow` 1 + `thiserror` 2
 - **Logging**: `tracing` + `tracing-subscriber` with env-filter
-- **Crypto/Identity**: `sha2`, `hex`, `base64`, `bs58` (SS58 address validation), `uuid` v4
+- **Crypto/Identity**: `sha2`, `hex`, `base64`, `bs58` (SS58 address validation), `schnorrkel` 0.11 (sr25519 signature verification), `rand_core` 0.6, `uuid` v4
 - **Time**: `chrono` with serde support
 - **Build Tooling**: `mold` linker via `.cargo/config.toml`, `clang` as linker driver
 - **Container**: Multi-stage Dockerfile — `rust:1.93-slim-bookworm` builder → `debian:bookworm-slim` runtime (includes python3, pip, venv, build-essential, git, curl)
@@ -168,4 +168,4 @@ Both hooks are activated via `git config core.hooksPath .githooks`.
 
 ## Authentication
 
-Authentication uses SS58 hotkey validation via the `X-Hotkey` HTTP header combined with an API key via the `X-Api-Key` header. The authorized hotkey is hardcoded as `AUTHORIZED_HOTKEY` in `src/config.rs`. The API key is configured via the `WORKER_API_KEY` environment variable (required). Only requests with both a matching hotkey and a valid API key can submit batches via `POST /submit`. All other endpoints are open.
+Authentication requires four HTTP headers: `X-Hotkey` (SS58 address), `X-Nonce` (unique per-request), `X-Signature` (sr25519 hex signature of `hotkey + nonce`), and `X-Api-Key`. The authorized hotkey is hardcoded as `AUTHORIZED_HOTKEY` in `src/config.rs`. The API key is configured via the `WORKER_API_KEY` environment variable (required). Verification steps: hotkey must match `AUTHORIZED_HOTKEY`, API key must match, SS58 format must be valid, nonce must not have been seen before (replay protection via `NonceStore` in `src/auth.rs` with 5-minute TTL), and the sr25519 signature must verify against the hotkey's public key using the Substrate signing context. Only requests passing all checks can submit batches via `POST /submit`. All other endpoints are open.
