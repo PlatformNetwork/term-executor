@@ -2,7 +2,7 @@
 name = "term-executor"
 version = "1.0.0"
 edition = "2021"
-description = "Remote evaluation executor for term-challenge — runs on Basilica"
+description = "Attested SWE-bench evaluation executor for term-challenge miners"
 authors = ["Platform Network"]
 license = "Apache-2.0"
 repository = "https://github.com/PlatformNetwork/term-executor"
@@ -13,12 +13,14 @@ path = "src/main.rs"
 
 [dependencies]
 # Web framework
-axum = { version = "0.7", features = ["json"] }
+axum = { version = "0.7", features = ["json", "ws", "multipart"] }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["cors", "trace"] }
 
 # Async runtime
 tokio = { version = "1", features = ["full", "process"] }
+tokio-stream = "0.1"
+futures = "0.3"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
@@ -55,7 +57,8 @@ tempfile = "3"
 parking_lot = "0.12"
 dashmap = "6"
 
-
+# SS58 address validation
+bs58 = "0.5"
 
 [dev-dependencies]
 tokio-test = "0.4"

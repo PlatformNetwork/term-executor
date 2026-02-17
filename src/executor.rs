@@ -3,15 +3,15 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::process::Command;
-use tokio::sync::watch::Receiver;
+use tokio::sync::Semaphore;
 use tracing::{debug, error, info, warn};
 
 use crate::config::Config;
 use crate::metrics::Metrics;
 use crate::session::{
-    EvalRequest, EvalResult, EvalStatus, EvalStep, Session, SessionManager, TaskTestResult,
+    Batch, BatchResult, BatchStatus, SessionManager, TaskResult, TaskStatus, TaskTestResult,
 };
-use crate::task;
+use crate::task::{ExtractedArchive, SweForgeTask};
 
 const MAX_OUTPUT: usize = 1024 * 1024;
 
@@ -88,183 +88,314 @@ impl Executor {
         }
     }
 
-    pub fn spawn_eval(&self, session: Arc<Session>) {
+    pub fn spawn_batch(
+        &self,
+        batch: Arc<Batch>,
+        archive: ExtractedArchive,
+        concurrent_limit: usize,
+    ) {
         let config = self.config.clone();
         let sessions = self.sessions.clone();
         let metrics = self.metrics.clone();
-        let cancel_rx = session.cancel.subscribe();
 
         tokio::spawn(async move {
             let start = std::time::Instant::now();
-            metrics.start_eval();
+            metrics.start_batch();
 
-            let result = run_eval(&config, &session, cancel_rx).await;
+            let result = run_batch(&config, &batch, archive, concurrent_limit).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
-            let mut res = session.result.lock().await;
+            let mut res = batch.result.lock().await;
             match result {
-                Ok(eval) => {
-                    let passed = eval.passed;
-                    *res = eval;
+                Ok(batch_result) => {
+                    let all_passed = batch_result.passed_tasks == batch_result.total_tasks;
+                    *res = batch_result;
                     res.duration_ms = Some(duration_ms);
-                    metrics.finish_eval(passed, duration_ms);
-                    if passed.unwrap_or(false) {
-                        sessions.mark_completed();
-                    } else {
-                        sessions.mark_failed();
-                    }
+                    metrics.finish_batch(all_passed, duration_ms);
+                    sessions.mark_completed();
                 }
                 Err(e) => {
-                    error!("Evaluation {} failed: {:#}", session.id, e);
-                    res.status = EvalStatus::Failed;
-                    res.step = EvalStep::Done;
+                    error!("Batch {} failed: {:#}", batch.id, e);
+                    res.status = BatchStatus::Failed;
                     res.error = Some(format!("{:#}", e));
                     res.duration_ms = Some(duration_ms);
-                    metrics.finish_eval(None, duration_ms);
+                    metrics.finish_batch(false, duration_ms);
                     sessions.mark_failed();
                 }
             }
+
+            batch
+                .emit_event(
+                    "batch_complete",
+                    None,
+                    serde_json::json!({
+                        "status": res.status,
+                        "total": res.total_tasks,
+                        "passed": res.passed_tasks,
+                        "failed": res.failed_tasks,
+                        "reward": res.aggregate_reward,
+                        "duration_ms": res.duration_ms,
+                    }),
+                )
+                .await;
         });
     }
 }
 
-async fn run_eval(
+async fn run_batch(
     config: &Config,
-    session: &Session,
-    cancel_rx: Receiver<bool>,
-) -> Result<EvalResult> {
-    let work_dir = config.workspace_base.join(&session.id);
-    tokio::fs::create_dir_all(&work_dir).await?;
+    batch: &Batch,
+    archive: ExtractedArchive,
+    concurrent_limit: usize,
+) -> Result<BatchResult> {
+    let total_tasks = archive.tasks.len();
+    let agent_code = Arc::new(archive.agent_code);
+    let agent_language = Arc::new(archive.agent_language);
 
-    let result = async {
-        // 1. Download task
-        set_step(session, EvalStep::DownloadingTask).await;
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Cancelled");
-        }
-
-        let task_dir = work_dir.join("task");
-        task::download_and_extract(&session.request.task_url, &task_dir).await?;
-        let task_root = task::find_task_root(&task_dir)?;
-        let swe_task = task::parse_task(&task_root)?;
-
-        // 2. Clone repository
-        set_step(session, EvalStep::CloningRepo).await;
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Cancelled");
-        }
-
-        let repo_dir = work_dir.join("repo");
-        clone_repo(
-            &swe_task.workspace.repo,
-            &repo_dir,
-            config.clone_timeout_secs,
-        )
-        .await?;
-
-        if let Some(ref commit) = swe_task.workspace.base_commit {
-            checkout_commit(&repo_dir, commit, config.clone_timeout_secs).await?;
-        }
-
-        // 3. Install dependencies
-        set_step(session, EvalStep::InstallingDeps).await;
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Cancelled");
-        }
-
-        if let Some(ref install_cmds) = swe_task.workspace.install {
-            for cmd in install_cmds {
-                info!("Running install command: {}", cmd);
-                let (_, stderr, exit) = run_shell(
-                    cmd,
-                    &repo_dir,
-                    Duration::from_secs(config.clone_timeout_secs),
-                    None,
-                )
-                .await?;
-                if exit != 0 {
-                    warn!(
-                        "Install command failed (exit {}): {}",
-                        exit,
-                        &stderr[..stderr.len().min(500)]
-                    );
-                }
-            }
-        }
-
-        // 4. Write + run agent code
-        set_step(session, EvalStep::RunningAgent).await;
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Cancelled");
-        }
-
-        let agent_output = run_agent(
-            &session.request,
-            &swe_task.prompt,
-            &repo_dir,
-            config.agent_timeout_secs,
-        )
-        .await?;
-
-        // 5. Write test source files
-        for (name, content) in &swe_task.test_source_files {
-            let dest = repo_dir.join(name);
-            if let Some(parent) = dest.parent() {
-                tokio::fs::create_dir_all(parent).await?;
-            }
-            tokio::fs::write(&dest, content).await?;
-        }
-
-        // 6. Run tests
-        set_step(session, EvalStep::RunningTests).await;
-        if *cancel_rx.borrow() {
-            anyhow::bail!("Cancelled");
-        }
-
-        let test_results =
-            run_tests(&swe_task.test_scripts, &repo_dir, config.test_timeout_secs).await?;
-
-        let all_passed = test_results.iter().all(|t| t.passed);
-        let test_output_combined = test_results
-            .iter()
-            .map(|t| {
-                format!(
-                    "=== {} (exit {}) ===\n{}\n{}",
-                    t.name,
-                    t.exit_code,
-                    t.output,
-                    if t.passed { "PASS" } else { "FAIL" }
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-
-        Ok(EvalResult {
-            status: EvalStatus::Completed,
-            step: EvalStep::Done,
-            passed: Some(all_passed),
-            test_results,
-            agent_output,
-            test_output: test_output_combined,
-            error: None,
-            duration_ms: None,
-        })
+    {
+        let mut res = batch.result.lock().await;
+        res.status = BatchStatus::Running;
+        res.total_tasks = total_tasks;
     }
-    .await;
 
-    // Cleanup
-    set_step(session, EvalStep::Cleanup).await;
-    crate::cleanup::remove_work_dir(&work_dir).await;
+    batch
+        .emit_event(
+            "batch_started",
+            None,
+            serde_json::json!({
+                "total_tasks": total_tasks,
+                "concurrent_limit": concurrent_limit,
+            }),
+        )
+        .await;
 
-    result
+    let semaphore = Arc::new(Semaphore::new(concurrent_limit));
+    let task_results: Arc<tokio::sync::Mutex<Vec<TaskResult>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+
+    let mut handles = Vec::new();
+
+    for task in archive.tasks {
+        let config = config.clone();
+        let batch_id = batch.id.clone();
+        let events_tx = batch.events_tx.clone();
+        let agent_code = agent_code.clone();
+        let agent_language = agent_language.clone();
+        let semaphore = semaphore.clone();
+        let task_results = task_results.clone();
+        let cancel_rx = batch.cancel.subscribe();
+
+        let handle = tokio::spawn(async move {
+            let _permit = semaphore.acquire().await.unwrap();
+
+            let task_id = task.id.clone();
+            let _ = events_tx.send(crate::session::WsEvent {
+                event: "task_started".to_string(),
+                batch_id: batch_id.clone(),
+                task_id: Some(task_id.clone()),
+                data: serde_json::json!({ "task_id": task_id }),
+            });
+
+            let result =
+                run_single_task(&config, &task, &agent_code, &agent_language, cancel_rx).await;
+
+            let _ = events_tx.send(crate::session::WsEvent {
+                event: "task_complete".to_string(),
+                batch_id: batch_id.clone(),
+                task_id: Some(task_id.clone()),
+                data: serde_json::json!({
+                    "task_id": task_id,
+                    "status": result.status,
+                    "passed": result.passed,
+                    "reward": result.reward,
+                }),
+            });
+
+            task_results.lock().await.push(result);
+        });
+
+        handles.push(handle);
+    }
+
+    for handle in handles {
+        if let Err(e) = handle.await {
+            warn!("Task handle panicked: {}", e);
+        }
+    }
+
+    let results = task_results.lock().await;
+    let completed = results.len();
+    let passed = results.iter().filter(|r| r.reward == 1.0).count();
+    let failed = completed - passed;
+    let aggregate_reward = if total_tasks > 0 {
+        results.iter().map(|r| r.reward).sum::<f64>() / total_tasks as f64
+    } else {
+        0.0
+    };
+
+    Ok(BatchResult {
+        batch_id: batch.id.clone(),
+        status: BatchStatus::Completed,
+        total_tasks,
+        completed_tasks: completed,
+        passed_tasks: passed,
+        failed_tasks: failed,
+        tasks: results.clone(),
+        aggregate_reward,
+        error: None,
+        duration_ms: None,
+    })
 }
 
-async fn set_step(session: &Session, step: EvalStep) {
-    let mut res = session.result.lock().await;
-    res.step = step;
-    if res.status == EvalStatus::Pending {
-        res.status = EvalStatus::Running;
+async fn run_single_task(
+    config: &Config,
+    task: &SweForgeTask,
+    agent_code: &str,
+    agent_language: &str,
+    cancel_rx: tokio::sync::watch::Receiver<bool>,
+) -> TaskResult {
+    let start = std::time::Instant::now();
+    let mut result = TaskResult::new(task.id.clone());
+
+    let work_dir = config.workspace_base.join(&task.id);
+    if let Err(e) = tokio::fs::create_dir_all(&work_dir).await {
+        result.status = TaskStatus::Failed;
+        result.error = Some(format!("Failed to create work dir: {}", e));
+        return result;
     }
+
+    let eval_result = run_task_pipeline(
+        config,
+        task,
+        agent_code,
+        agent_language,
+        &work_dir,
+        &cancel_rx,
+    )
+    .await;
+
+    crate::cleanup::remove_work_dir(&work_dir).await;
+
+    let duration_ms = start.elapsed().as_millis() as u64;
+
+    match eval_result {
+        Ok(mut r) => {
+            r.duration_ms = Some(duration_ms);
+            r
+        }
+        Err(e) => {
+            result.status = TaskStatus::Failed;
+            result.error = Some(format!("{:#}", e));
+            result.duration_ms = Some(duration_ms);
+            result
+        }
+    }
+}
+
+async fn run_task_pipeline(
+    config: &Config,
+    task: &SweForgeTask,
+    agent_code: &str,
+    agent_language: &str,
+    work_dir: &Path,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+) -> Result<TaskResult> {
+    let mut result = TaskResult::new(task.id.clone());
+
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Cancelled");
+    }
+
+    result.status = TaskStatus::CloningRepo;
+    let repo_dir = work_dir.join("repo");
+    clone_repo(&task.workspace.repo, &repo_dir, config.clone_timeout_secs).await?;
+
+    if let Some(ref commit) = task.workspace.base_commit {
+        checkout_commit(&repo_dir, commit, config.clone_timeout_secs).await?;
+    }
+
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Cancelled");
+    }
+
+    result.status = TaskStatus::InstallingDeps;
+    if let Some(ref install_cmds) = task.workspace.install {
+        for cmd in install_cmds {
+            info!("[{}] Installing: {}", task.id, cmd);
+            let (_, stderr, exit) = run_shell(
+                cmd,
+                &repo_dir,
+                Duration::from_secs(config.clone_timeout_secs),
+                None,
+            )
+            .await?;
+            if exit != 0 {
+                warn!(
+                    "[{}] Install failed (exit {}): {}",
+                    task.id,
+                    exit,
+                    &stderr[..stderr.len().min(500)]
+                );
+            }
+        }
+    }
+
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Cancelled");
+    }
+
+    result.status = TaskStatus::RunningAgent;
+    let agent_output = run_agent(
+        agent_code,
+        agent_language,
+        &task.prompt,
+        &repo_dir,
+        config.agent_timeout_secs,
+    )
+    .await?;
+    let _ = agent_output;
+
+    for (name, content) in &task.test_source_files {
+        let dest = repo_dir.join(name);
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(&dest, content).await?;
+    }
+
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Cancelled");
+    }
+
+    result.status = TaskStatus::RunningTests;
+    let test_results = run_tests(&task.test_scripts, &repo_dir, config.test_timeout_secs).await?;
+
+    let all_passed = test_results.iter().all(|t| t.passed);
+    let test_output_combined = test_results
+        .iter()
+        .map(|t| {
+            format!(
+                "=== {} (exit {}) ===\n{}\n{}",
+                t.name,
+                t.exit_code,
+                t.output,
+                if t.passed { "PASS" } else { "FAIL" }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+
+    result.status = if all_passed {
+        TaskStatus::Completed
+    } else {
+        TaskStatus::Failed
+    };
+    result.passed = Some(all_passed);
+    result.reward = if all_passed { 1.0 } else { 0.0 };
+    result.test_results = test_results;
+    result.test_output = test_output_combined;
+
+    Ok(result)
 }
 
 async fn clone_repo(repo_url: &str, dest: &Path, timeout_secs: u64) -> Result<()> {
@@ -338,20 +469,21 @@ fn agent_runner(language: &str, script_path: &str) -> Vec<String> {
 }
 
 async fn run_agent(
-    request: &EvalRequest,
+    agent_code: &str,
+    agent_language: &str,
     prompt: &str,
     repo_dir: &Path,
     timeout_secs: u64,
 ) -> Result<String> {
-    let ext = agent_extension(&request.agent_language);
+    let ext = agent_extension(agent_language);
     let script_name = format!("_agent_code{}", ext);
     let script_path = repo_dir.join(&script_name);
-    tokio::fs::write(&script_path, &request.agent_code).await?;
+    tokio::fs::write(&script_path, agent_code).await?;
 
     let prompt_path = repo_dir.join("_task_prompt.md");
     tokio::fs::write(&prompt_path, prompt).await?;
 
-    let argv_owned = agent_runner(&request.agent_language, &script_name);
+    let argv_owned = agent_runner(agent_language, &script_name);
     let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
     info!("Running agent: {:?}", argv);
 
