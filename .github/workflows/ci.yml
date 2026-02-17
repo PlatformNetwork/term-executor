@@ -17,9 +17,9 @@ env:
   RUST_BACKTRACE: short
 
 jobs:
-  lint:
-    name: Lint & Format
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+  check:
+    name: Format + Lint + Test + Build
+    runs-on: blacksmith-32vcpu-ubuntu-2404
     steps:
       - uses: actions/checkout@v4
 
@@ -38,9 +38,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: lint-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
+          key: check-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            lint-${{ runner.os }}-nightly-
+            check-${{ runner.os }}-nightly-
 
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
@@ -48,28 +48,10 @@ jobs:
       - name: Clippy
         run: cargo +nightly clippy --all-targets -- -D warnings
 
-  build:
-    name: Build (nightly, release, 32 threads)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mold linker
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold clang
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: build-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            build-${{ runner.os }}-nightly-
+      - name: Run tests
+        run: cargo +nightly test --release -j $(nproc) -- --test-threads=$(nproc)
+        env:
+          RUST_LOG: warn
 
       - name: Build release
         run: cargo +nightly build --release -j $(nproc)
@@ -83,38 +65,10 @@ jobs:
           path: target/release/term-executor
           retention-days: 7
 
-  test:
-    name: Tests (nightly, 32 threads)
-    runs-on: blacksmith-32vcpu-ubuntu-2404
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install mold linker
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq mold clang
-
-      - name: Install Rust nightly
-        uses: dtolnay/rust-toolchain@nightly
-
-      - name: Cache cargo registry + target
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: test-${{ runner.os }}-nightly-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            test-${{ runner.os }}-nightly-
-
-      - name: Run tests
-        run: cargo +nightly test --release -j $(nproc) -- --test-threads=$(nproc)
-        env:
-          RUST_LOG: warn
-
   docker:
     name: Docker build
     runs-on: blacksmith-32vcpu-ubuntu-2404
-    needs: [lint, build, test]
+    needs: [check]
     if: github.ref == 'refs/heads/main'
     steps:
       - uses: actions/checkout@v4
@@ -138,3 +92,31 @@ jobs:
           tags: |
             ghcr.io/${{ steps.lower.outputs.repo }}:latest
             ghcr.io/${{ steps.lower.outputs.repo }}:${{ github.sha }}
+
+  release:
+    name: Semantic Release
+    runs-on: ubuntu-latest
+    needs: [check]
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install semantic-release
+        run: npm install -g semantic-release @semantic-release/changelog @semantic-release/git @semantic-release/exec
+
+      - name: Run semantic-release
+        run: npx semantic-release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
