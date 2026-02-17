@@ -164,7 +164,8 @@ Both hooks are activated via `git config core.hooksPath .githooks`.
 | `MAX_ARCHIVE_BYTES` | `524288000` | Max uploaded archive size (500MB) |
 | `MAX_OUTPUT_BYTES` | `1048576` | Max captured output per command (1MB) |
 | `WORKSPACE_BASE` | `/tmp/sessions` | Base directory for session workspaces |
+| `WORKER_API_KEY` | *(required)* | API key that whitelisted hotkeys must provide via `X-Api-Key` header |
 
 ## Authentication
 
-Authentication uses SS58 hotkey validation via the `X-Hotkey` HTTP header. The authorized hotkey is hardcoded as `AUTHORIZED_HOTKEY` in `src/config.rs`. Only requests with a matching hotkey can submit batches via `POST /submit`. All other endpoints are open.
+Authentication uses SS58 hotkey validation via the `X-Hotkey` HTTP header combined with an API key via the `X-Api-Key` header. The authorized hotkey is hardcoded as `AUTHORIZED_HOTKEY` in `src/config.rs`. The API key is configured via the `WORKER_API_KEY` environment variable (required). Only requests with both a matching hotkey and a valid API key can submit batches via `POST /submit`. All other endpoints are open.

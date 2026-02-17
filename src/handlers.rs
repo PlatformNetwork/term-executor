@@ -103,12 +103,16 @@ async fn submit_batch(
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
                 "error": "missing_auth",
-                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature"
+                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature, X-Api-Key"
             })),
         )
     })?;
 
-    if let Err(e) = auth::verify_request(&auth_headers, &state.nonce_store) {
+    if let Err(e) = auth::verify_request(
+        &auth_headers,
+        &state.nonce_store,
+        &state.config.worker_api_key,
+    ) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({

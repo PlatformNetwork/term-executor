@@ -25,6 +25,7 @@ pub struct Config {
     #[allow(dead_code)]
     pub max_output_bytes: usize,
     pub workspace_base: PathBuf,
+    pub worker_api_key: String,
 }
 
 impl Config {
@@ -41,6 +42,8 @@ impl Config {
             workspace_base: PathBuf::from(
                 std::env::var("WORKSPACE_BASE").unwrap_or_else(|_| DEFAULT_WORKSPACE_BASE.into()),
             ),
+            worker_api_key: std::env::var("WORKER_API_KEY")
+                .expect("WORKER_API_KEY environment variable must be set"),
         }
     }
 
@@ -62,6 +65,7 @@ impl Config {
             "║  Workspace:         {:<28}║",
             self.workspace_base.display()
         );
+        tracing::info!("║  API key:           {:<28}║", "configured");
         tracing::info!("╚══════════════════════════════════════════════════╝");
     }
 }
@@ -79,9 +83,11 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
+        std::env::set_var("WORKER_API_KEY", "test-api-key-123");
         let cfg = Config::from_env();
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
+        assert_eq!(cfg.worker_api_key, "test-api-key-123");
     }
 
     #[test]
