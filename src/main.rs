@@ -29,6 +29,7 @@ async fn main() {
 
     let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
     let metrics_store = metrics::Metrics::new();
+    let nonce_store = Arc::new(auth::NonceStore::new());
     let executor = Arc::new(executor::Executor::new(
         config.clone(),
         sessions.clone(),
@@ -40,6 +41,7 @@ async fn main() {
         sessions: sessions.clone(),
         metrics: metrics_store,
         executor,
+        nonce_store: nonce_store.clone(),
         started_at: chrono::Utc::now(),
     });
 
@@ -49,6 +51,11 @@ async fn main() {
     let sessions_reaper = sessions.clone();
     tokio::spawn(async move {
         sessions_reaper.reaper_loop().await;
+    });
+
+    let nonce_reaper = nonce_store.clone();
+    tokio::spawn(async move {
+        nonce_reaper.reaper_loop().await;
     });
 
     let workspace = config.workspace_base.clone();

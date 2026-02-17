@@ -10,7 +10,7 @@ use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
-use crate::auth;
+use crate::auth::{self, NonceStore};
 use crate::config::Config;
 use crate::executor::Executor;
 use crate::metrics::Metrics;
@@ -22,6 +22,7 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     pub metrics: Arc<Metrics>,
     pub executor: Arc<Executor>,
+    pub nonce_store: Arc<NonceStore>,
     pub started_at: chrono::DateTime<Utc>,
 }
 
@@ -97,13 +98,22 @@ async fn submit_batch(
     query: axum::extract::Query<SubmitQuery>,
     mut multipart: Multipart,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let hotkey = auth::extract_hotkey(&headers);
-    if !auth::verify_hotkey(hotkey.as_deref()) {
+    let auth_headers = auth::extract_auth_headers(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "missing_auth",
+                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature"
+            })),
+        )
+    })?;
+
+    if let Err(e) = auth::verify_request(&auth_headers, &state.nonce_store) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
-                "error": "unauthorized",
-                "message": "Invalid or missing X-Hotkey header. Only the authorized hotkey can submit tasks."
+                "error": e.code(),
+                "message": e.message(),
             })),
         ));
     }
