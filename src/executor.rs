@@ -112,11 +112,7 @@ impl Executor {
                     *res = batch_result;
                     res.duration_ms = Some(duration_ms);
                     metrics.finish_batch(all_passed, duration_ms);
-                    if all_passed {
-                        sessions.mark_completed();
-                    } else {
-                        sessions.mark_completed();
-                    }
+                    sessions.mark_completed();
                 }
                 Err(e) => {
                     error!("Batch {} failed: {:#}", batch.id, e);

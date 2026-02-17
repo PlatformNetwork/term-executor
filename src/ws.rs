@@ -38,7 +38,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                 "batch_id": batch_id,
             });
             let _ = sender
-                .send(Message::Text(serde_json::to_string(&err).unwrap().into()))
+                .send(Message::Text(serde_json::to_string(&err).unwrap()))
                 .await;
             return;
         }
@@ -67,7 +67,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
 
     if sender
         .send(Message::Text(
-            serde_json::to_string(&snapshot).unwrap().into(),
+            serde_json::to_string(&snapshot).unwrap(),
         ))
         .await
         .is_err()
@@ -84,7 +84,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                         Ok(j) => j,
                         Err(_) => continue,
                     };
-                    if sender.send(Message::Text(json.into())).await.is_err() {
+                    if sender.send(Message::Text(json)).await.is_err() {
                         break;
                     }
                 }
@@ -99,7 +99,7 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                     });
                     let _ = sender
                         .send(Message::Text(
-                            serde_json::to_string(&close_msg).unwrap().into(),
+                            serde_json::to_string(&close_msg).unwrap(),
                         ))
                         .await;
                     break;
