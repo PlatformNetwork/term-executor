@@ -1,28 +1,27 @@
 use axum::{
-    extract::State,
+    extract::{Multipart, State},
     http::StatusCode,
     response::{IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use chrono::Utc;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 
 use crate::auth;
 use crate::config::Config;
 use crate::executor::Executor;
 use crate::metrics::Metrics;
-use crate::session::{EvalRequest, SessionManager};
+use crate::session::SessionManager;
+use crate::ws;
 
 pub struct AppState {
     pub config: Arc<Config>,
     pub sessions: Arc<SessionManager>,
     pub metrics: Arc<Metrics>,
     pub executor: Arc<Executor>,
-    pub semaphore: Arc<Semaphore>,
     pub started_at: chrono::DateTime<Utc>,
 }
 
@@ -31,9 +30,12 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
-        .route("/evaluate", post(evaluate))
-        .route("/evaluate/{id}", get(get_eval))
-        .route("/evaluations", get(list_evals))
+        .route("/submit", post(submit_batch))
+        .route("/batch/{id}", get(get_batch))
+        .route("/batch/{id}/tasks", get(get_batch_tasks))
+        .route("/batch/{id}/task/{task_id}", get(get_task))
+        .route("/batches", get(list_batches))
+        .route("/ws", get(ws::ws_handler))
         .with_state(state)
 }
 
@@ -45,13 +47,13 @@ async fn health() -> impl IntoResponse {
 struct StatusResponse {
     version: String,
     uptime_secs: i64,
-    active_evals: u64,
-    total_evals: u64,
-    passed: u64,
-    failed: u64,
-    cancelled: u64,
-    capacity: usize,
-    available_slots: usize,
+    active_batches: u64,
+    total_batches: u64,
+    completed_batches: u64,
+    tasks_passed: u64,
+    tasks_failed: u64,
+    max_concurrent_tasks: usize,
+    has_active_batch: bool,
 }
 
 async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
@@ -59,13 +61,13 @@ async fn status(State(state): State<Arc<AppState>>) -> Json<StatusResponse> {
     Json(StatusResponse {
         version: env!("CARGO_PKG_VERSION").to_string(),
         uptime_secs: uptime,
-        active_evals: state.metrics.evals_active.load(Ordering::Relaxed),
-        total_evals: state.metrics.evals_total.load(Ordering::Relaxed),
-        passed: state.metrics.evals_passed.load(Ordering::Relaxed),
-        failed: state.metrics.evals_failed.load(Ordering::Relaxed),
-        cancelled: state.metrics.evals_cancelled.load(Ordering::Relaxed),
-        capacity: state.config.max_concurrent_evals,
-        available_slots: state.semaphore.available_permits(),
+        active_batches: state.metrics.batches_active.load(Ordering::Relaxed),
+        total_batches: state.metrics.batches_total.load(Ordering::Relaxed),
+        completed_batches: state.metrics.batches_completed.load(Ordering::Relaxed),
+        tasks_passed: state.metrics.tasks_passed.load(Ordering::Relaxed),
+        tasks_failed: state.metrics.tasks_failed.load(Ordering::Relaxed),
+        max_concurrent_tasks: state.config.max_concurrent_tasks,
+        has_active_batch: state.sessions.has_active_batch(),
     })
 }
 
@@ -79,141 +81,212 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
-#[derive(Deserialize)]
-struct EvalPayload {
-    agent_code: String,
-    #[serde(default = "default_language")]
-    agent_language: String,
-    task_url: String,
-    #[serde(default)]
-    timeout_secs: Option<u64>,
+#[derive(serde::Deserialize)]
+struct SubmitQuery {
+    #[serde(default = "default_concurrent")]
+    concurrent_tasks: Option<usize>,
 }
 
-fn default_language() -> String {
-    "python".to_string()
+fn default_concurrent() -> Option<usize> {
+    None
 }
 
-async fn evaluate(
+async fn submit_batch(
     State(state): State<Arc<AppState>>,
     headers: axum::http::HeaderMap,
-    Json(payload): Json<EvalPayload>,
-) -> Result<impl IntoResponse, (StatusCode, String)> {
-    // Auth check
-    if let Some(ref expected) = state.config.auth_token {
-        let auth_header = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok());
-        if !auth::check_token(auth_header, expected) {
-            return Err((StatusCode::UNAUTHORIZED, "Invalid token".to_string()));
+    query: axum::extract::Query<SubmitQuery>,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    let hotkey = auth::extract_hotkey(&headers);
+    if !auth::verify_hotkey(hotkey.as_deref()) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "unauthorized",
+                "message": "Invalid or missing X-Hotkey header. Only the authorized hotkey can submit tasks."
+            })),
+        ));
+    }
+
+    if state.sessions.has_active_batch() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "busy",
+                "message": "A batch is already running. Wait for it to complete."
+            })),
+        ));
+    }
+
+    let mut archive_data: Option<Vec<u8>> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        if name == "archive" || name == "file" {
+            let data = field.bytes().await.map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "upload_failed",
+                        "message": format!("Failed to read upload: {}", e)
+                    })),
+                )
+            })?;
+            archive_data = Some(data.to_vec());
         }
     }
 
-    // Validate payload
-    if payload.agent_code.len() > state.config.max_agent_code_bytes {
+    let archive_bytes = archive_data.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "missing_archive",
+                "message": "No archive file uploaded. Send a multipart form with field 'archive'."
+            })),
+        )
+    })?;
+
+    if archive_bytes.len() > state.config.max_archive_bytes {
         return Err((
             StatusCode::BAD_REQUEST,
-            format!(
-                "agent_code too large ({} bytes, max {})",
-                payload.agent_code.len(),
-                state.config.max_agent_code_bytes
-            ),
+            Json(serde_json::json!({
+                "error": "archive_too_large",
+                "message": format!("Archive is {} bytes, max is {}", archive_bytes.len(), state.config.max_archive_bytes)
+            })),
         ));
     }
 
-    if payload.task_url.len() > 2048 {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "task_url too long (max 2048 chars)".to_string(),
-        ));
-    }
+    let extract_dir = state.config.workspace_base.join("_extract_tmp");
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
-    if payload.task_url.is_empty() {
-        return Err((StatusCode::BAD_REQUEST, "task_url is required".to_string()));
-    }
+    let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "extraction_failed",
+                    "message": format!("Failed to extract archive: {}", e)
+                })),
+            )
+        })?;
 
-    if payload.agent_code.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "agent_code is required".to_string(),
-        ));
-    }
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
-    // Capacity check
-    let permit = state.semaphore.clone().try_acquire_owned();
-    if permit.is_err() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!(
-                "At capacity ({}/{}). Try again later.",
-                state.config.max_concurrent_evals, state.config.max_concurrent_evals
-            ),
-        ));
-    }
+    let total_tasks = extracted.tasks.len();
+    let concurrent = query
+        .concurrent_tasks
+        .unwrap_or(state.config.max_concurrent_tasks)
+        .min(state.config.max_concurrent_tasks);
 
-    let request = EvalRequest {
-        agent_code: payload.agent_code,
-        agent_language: payload.agent_language,
-        task_url: payload.task_url,
-        timeout_secs: payload.timeout_secs,
-    };
+    let batch = state.sessions.create_batch(total_tasks);
+    let batch_id = batch.id.clone();
 
-    let session = state.sessions.create(request);
-    let id = session.id.clone();
-
-    // Spawn with permit held; permit is dropped when task completes
-    let executor = state.executor.clone();
-    let permit = permit.unwrap();
-    tokio::spawn(async move {
-        executor.spawn_eval(session);
-        // Hold the permit until the session manager marks it done
-        // We don't actually need to hold it since the semaphore tracks capacity
-        drop(permit);
-    });
+    state
+        .executor
+        .spawn_batch(batch, extracted, concurrent);
 
     Ok((
         StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "eval_id": id })),
+        Json(serde_json::json!({
+            "batch_id": batch_id,
+            "total_tasks": total_tasks,
+            "concurrent_tasks": concurrent,
+            "ws_url": format!("/ws?batch_id={}", batch_id),
+        })),
     ))
 }
 
-async fn get_eval(
+async fn get_batch(
     State(state): State<Arc<AppState>>,
     axum::extract::Path(id): axum::extract::Path<String>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let session = state.sessions.get(&id).ok_or(StatusCode::NOT_FOUND)?;
-    let result = session.result.lock().await;
+    let batch = state.sessions.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let result = batch.result.lock().await;
 
     Ok(Json(serde_json::json!({
-        "eval_id": session.id,
+        "batch_id": result.batch_id,
         "status": result.status,
-        "step": result.step,
-        "passed": result.passed,
-        "test_results": result.test_results,
-        "agent_output": result.agent_output,
-        "test_output": result.test_output,
+        "total_tasks": result.total_tasks,
+        "completed_tasks": result.completed_tasks,
+        "passed_tasks": result.passed_tasks,
+        "failed_tasks": result.failed_tasks,
+        "aggregate_reward": result.aggregate_reward,
         "error": result.error,
         "duration_ms": result.duration_ms,
     })))
 }
 
-#[derive(Serialize)]
-struct EvalListEntry {
-    eval_id: String,
-    task_url: String,
-    language: String,
-    created_at: String,
+async fn get_batch_tasks(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let batch = state.sessions.get(&id).ok_or(StatusCode::NOT_FOUND)?;
+    let result = batch.result.lock().await;
+
+    let tasks: Vec<serde_json::Value> = result
+        .tasks
+        .iter()
+        .map(|t| {
+            serde_json::json!({
+                "task_id": t.task_id,
+                "status": t.status,
+                "passed": t.passed,
+                "reward": t.reward,
+                "test_output": t.test_output,
+                "error": t.error,
+                "duration_ms": t.duration_ms,
+            })
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "batch_id": result.batch_id,
+        "tasks": tasks,
+    })))
 }
 
-async fn list_evals(State(state): State<Arc<AppState>>) -> Json<Vec<EvalListEntry>> {
-    let sessions = state.sessions.list_sessions();
+async fn get_task(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path((batch_id, task_id)): axum::extract::Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let batch = state.sessions.get(&batch_id).ok_or(StatusCode::NOT_FOUND)?;
+    let result = batch.result.lock().await;
+
+    let task = result
+        .tasks
+        .iter()
+        .find(|t| t.task_id == task_id)
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(serde_json::json!({
+        "task_id": task.task_id,
+        "status": task.status,
+        "passed": task.passed,
+        "reward": task.reward,
+        "test_results": task.test_results,
+        "test_output": task.test_output,
+        "error": task.error,
+        "duration_ms": task.duration_ms,
+    })))
+}
+
+#[derive(Serialize)]
+struct BatchListEntry {
+    batch_id: String,
+    created_at: String,
+    status: crate::session::BatchStatus,
+}
+
+async fn list_batches(State(state): State<Arc<AppState>>) -> Json<Vec<BatchListEntry>> {
+    let batches = state.sessions.list_batches();
     Json(
-        sessions
+        batches
             .into_iter()
-            .map(|s| EvalListEntry {
-                eval_id: s.id,
-                task_url: s.task_url,
-                language: s.language,
-                created_at: s.created_at.to_rfc3339(),
+            .map(|b| BatchListEntry {
+                batch_id: b.batch_id,
+                created_at: b.created_at.to_rfc3339(),
+                status: b.status,
             })
             .collect(),
     )

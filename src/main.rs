@@ -4,12 +4,11 @@ mod config;
 mod executor;
 mod handlers;
 mod metrics;
-
 mod session;
 mod task;
+mod ws;
 
 use std::sync::Arc;
-use tokio::sync::Semaphore;
 use tracing::info;
 
 #[tokio::main]
@@ -24,14 +23,12 @@ async fn main() {
     let config = Arc::new(config::Config::from_env());
     config.print_banner();
 
-    // Create workspace base directory
     tokio::fs::create_dir_all(&config.workspace_base)
         .await
         .expect("Failed to create workspace directory");
 
     let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
     let metrics_store = metrics::Metrics::new();
-    let semaphore = Arc::new(Semaphore::new(config.max_concurrent_evals));
     let executor = Arc::new(executor::Executor::new(
         config.clone(),
         sessions.clone(),
@@ -43,20 +40,17 @@ async fn main() {
         sessions: sessions.clone(),
         metrics: metrics_store,
         executor,
-        semaphore,
         started_at: chrono::Utc::now(),
     });
 
     let app = handlers::router(state);
     let addr = format!("0.0.0.0:{}", config.port);
 
-    // Session reaper
     let sessions_reaper = sessions.clone();
     tokio::spawn(async move {
         sessions_reaper.reaper_loop().await;
     });
 
-    // Stale dir reaper
     let workspace = config.workspace_base.clone();
     let ttl = config.session_ttl_secs;
     tokio::spawn(async move {
@@ -70,7 +64,6 @@ async fn main() {
     info!("Listening on {}", addr);
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
 
-    // Graceful shutdown on SIGTERM
     let shutdown = async {
         tokio::signal::ctrl_c()
             .await

@@ -11,10 +11,12 @@ RUN cargo build --release && strip target/release/term-executor
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl libssl3 \
+    python3 python3-pip python3-venv \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
 RUN mkdir -p /tmp/sessions
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
-CMD ["term-executor"]
+ENTRYPOINT ["/usr/local/bin/term-executor"]
