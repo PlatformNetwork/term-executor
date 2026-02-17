@@ -1,3 +1,11 @@
+# [1.2.0](https://github.com/PlatformNetwork/term-executor/compare/v1.1.0...v1.2.0) (2026-02-17)
+
+
+### Features
+
+* **auth:** add sr25519 signature + nonce verification ([dc8d8d4](https://github.com/PlatformNetwork/term-executor/commit/dc8d8d405e5e6d08100d900b8e94e29ced0b5417))
+* **auth:** require API key alongside whitelisted hotkey ([#3](https://github.com/PlatformNetwork/term-executor/issues/3)) ([887f72b](https://github.com/PlatformNetwork/term-executor/commit/887f72bac8021e073e10d65e385ecb3205b55010))
+
 # [1.1.0](https://github.com/PlatformNetwork/term-executor/compare/v1.0.0...v1.1.0) (2026-02-17)
 
 
