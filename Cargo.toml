@@ -57,8 +57,10 @@ tempfile = "3"
 parking_lot = "0.12"
 dashmap = "6"
 
-# SS58 address validation
+# SS58 address validation & sr25519 signature verification
 bs58 = "0.5"
+schnorrkel = "0.11"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
