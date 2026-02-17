@@ -41,6 +41,7 @@ pub struct AuthHeaders {
     pub hotkey: String,
     pub nonce: String,
     pub signature: String,
+    pub api_key: String,
 }
 
 pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeaders> {
@@ -62,16 +63,31 @@ pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeade
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string())?;
 
+    let api_key = headers
+        .get("X-Api-Key")
+        .or_else(|| headers.get("x-api-key"))
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string())?;
+
     Some(AuthHeaders {
         hotkey,
         nonce,
         signature,
+        api_key,
     })
 }
 
-pub fn verify_request(auth: &AuthHeaders, nonce_store: &NonceStore) -> Result<(), AuthError> {
+pub fn verify_request(
+    auth: &AuthHeaders,
+    nonce_store: &NonceStore,
+    expected_api_key: &str,
+) -> Result<(), AuthError> {
     if auth.hotkey != AUTHORIZED_HOTKEY {
         return Err(AuthError::UnauthorizedHotkey);
+    }
+
+    if auth.api_key != expected_api_key {
+        return Err(AuthError::InvalidApiKey);
     }
 
     if !validate_ss58(&auth.hotkey) {
@@ -94,6 +110,7 @@ pub fn verify_request(auth: &AuthHeaders, nonce_store: &NonceStore) -> Result<()
 pub enum AuthError {
     UnauthorizedHotkey,
     InvalidHotkey,
+    InvalidApiKey,
     NonceReused,
     InvalidSignature,
 }
@@ -103,6 +120,7 @@ impl AuthError {
         match self {
             AuthError::UnauthorizedHotkey => "Hotkey is not authorized",
             AuthError::InvalidHotkey => "Invalid SS58 hotkey format",
+            AuthError::InvalidApiKey => "Invalid API key",
             AuthError::NonceReused => "Nonce has already been used",
             AuthError::InvalidSignature => "Signature verification failed",
         }
@@ -112,6 +130,7 @@ impl AuthError {
         match self {
             AuthError::UnauthorizedHotkey => "unauthorized_hotkey",
             AuthError::InvalidHotkey => "invalid_hotkey",
+            AuthError::InvalidApiKey => "invalid_api_key",
             AuthError::NonceReused => "nonce_reused",
             AuthError::InvalidSignature => "invalid_signature",
         }
@@ -183,6 +202,18 @@ pub fn validate_ss58(address: &str) -> bool {
 }
 
 #[cfg(test)]
+fn sp_ss58_checksum(data: &[u8]) -> [u8; 64] {
+    use sha2::{Digest, Sha512};
+    let mut hasher = Sha512::new();
+    hasher.update(b"SS58PRE");
+    hasher.update(data);
+    let result = hasher.finalize();
+    let mut out = [0u8; 64];
+    out.copy_from_slice(&result);
+    out
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -219,12 +250,14 @@ mod tests {
         headers.insert("X-Hotkey", AUTHORIZED_HOTKEY.parse().unwrap());
         headers.insert("X-Nonce", "test-nonce-123".parse().unwrap());
         headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        headers.insert("X-Api-Key", "my-secret-key".parse().unwrap());
         let auth = extract_auth_headers(&headers);
         assert!(auth.is_some());
         let auth = auth.unwrap();
         assert_eq!(auth.hotkey, AUTHORIZED_HOTKEY);
         assert_eq!(auth.nonce, "test-nonce-123");
         assert_eq!(auth.signature, "0xdeadbeef");
+        assert_eq!(auth.api_key, "my-secret-key");
     }
 
     #[test]
@@ -240,9 +273,32 @@ mod tests {
             hotkey: "5InvalidHotkey".to_string(),
             nonce: "nonce-1".to_string(),
             signature: "0x00".to_string(),
+            api_key: "test-key".to_string(),
         };
-        let err = verify_request(&auth, &store).unwrap_err();
+        let err = verify_request(&auth, &store, "test-key").unwrap_err();
         assert!(matches!(err, AuthError::UnauthorizedHotkey));
+    }
+
+    #[test]
+    fn test_verify_request_invalid_api_key() {
+        let store = NonceStore::new();
+        let auth = AuthHeaders {
+            hotkey: AUTHORIZED_HOTKEY.to_string(),
+            nonce: "nonce-1".to_string(),
+            signature: "0x00".to_string(),
+            api_key: "wrong-key".to_string(),
+        };
+        let err = verify_request(&auth, &store, "correct-key").unwrap_err();
+        assert!(matches!(err, AuthError::InvalidApiKey));
+    }
+
+    #[test]
+    fn test_extract_auth_headers_missing_api_key() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", AUTHORIZED_HOTKEY.parse().unwrap());
+        headers.insert("X-Nonce", "test-nonce-123".parse().unwrap());
+        headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
     }
 
     #[test]
@@ -271,16 +327,4 @@ mod tests {
         assert!(verify_sr25519_signature(&ss58, &message, &sig_hex));
         assert!(!verify_sr25519_signature(&ss58, "wrong-message", &sig_hex));
     }
-}
-
-#[cfg(test)]
-fn sp_ss58_checksum(data: &[u8]) -> [u8; 64] {
-    use sha2::{Digest, Sha512};
-    let mut hasher = Sha512::new();
-    hasher.update(b"SS58PRE");
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut out = [0u8; 64];
-    out.copy_from_slice(&result);
-    out
 }
