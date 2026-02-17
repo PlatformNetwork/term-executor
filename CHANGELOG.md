@@ -1,3 +1,10 @@
+# [1.1.0](https://github.com/PlatformNetwork/term-executor/compare/v1.0.0...v1.1.0) (2026-02-17)
+
+
+### Features
+
+* **executor:** add SWE-bench batch evaluation with hotkey auth and WebSocket streaming ([#2](https://github.com/PlatformNetwork/term-executor/issues/2)) ([8bfa8ee](https://github.com/PlatformNetwork/term-executor/commit/8bfa8eea464fc19b10eda23a834b3b019582d624))
+
 # 1.0.0 (2026-02-17)
 
 
