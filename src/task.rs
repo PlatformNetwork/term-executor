@@ -132,7 +132,10 @@ fn load_agent_code(root: &Path) -> Result<String> {
         if files.len() == 1 {
             agent_content = content;
         } else {
-            agent_content.push_str(&format!("# --- {} ---\n", entry.file_name().to_string_lossy()));
+            agent_content.push_str(&format!(
+                "# --- {} ---\n",
+                entry.file_name().to_string_lossy()
+            ));
             agent_content.push_str(&content);
             agent_content.push('\n');
         }
@@ -191,11 +194,7 @@ fn load_tasks(root: &Path) -> Result<Vec<SweForgeTask>> {
         match parse_task(&task_dir) {
             Ok(task) => tasks.push(task),
             Err(e) => {
-                tracing::warn!(
-                    "Skipping task dir {}: {}",
-                    task_dir.display(),
-                    e
-                );
+                tracing::warn!("Skipping task dir {}: {}", task_dir.display(), e);
             }
         }
     }

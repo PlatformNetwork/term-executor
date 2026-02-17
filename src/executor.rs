@@ -102,8 +102,7 @@ impl Executor {
             let start = std::time::Instant::now();
             metrics.start_batch();
 
-            let result =
-                run_batch(&config, &batch, archive, concurrent_limit).await;
+            let result = run_batch(&config, &batch, archive, concurrent_limit).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             let mut res = batch.result.lock().await;
@@ -269,7 +268,15 @@ async fn run_single_task(
         return result;
     }
 
-    let eval_result = run_task_pipeline(config, task, agent_code, agent_language, &work_dir, &cancel_rx).await;
+    let eval_result = run_task_pipeline(
+        config,
+        task,
+        agent_code,
+        agent_language,
+        &work_dir,
+        &cancel_rx,
+    )
+    .await;
 
     crate::cleanup::remove_work_dir(&work_dir).await;
 
@@ -365,8 +372,7 @@ async fn run_task_pipeline(
     }
 
     result.status = TaskStatus::RunningTests;
-    let test_results =
-        run_tests(&task.test_scripts, &repo_dir, config.test_timeout_secs).await?;
+    let test_results = run_tests(&task.test_scripts, &repo_dir, config.test_timeout_secs).await?;
 
     let all_passed = test_results.iter().all(|t| t.passed);
     let test_output_combined = test_results

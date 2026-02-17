@@ -182,9 +182,7 @@ async fn submit_batch(
     let batch = state.sessions.create_batch(total_tasks);
     let batch_id = batch.id.clone();
 
-    state
-        .executor
-        .spawn_batch(batch, extracted, concurrent);
+    state.executor.spawn_batch(batch, extracted, concurrent);
 
     Ok((
         StatusCode::ACCEPTED,
