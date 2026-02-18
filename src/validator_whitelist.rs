@@ -23,6 +23,11 @@ impl ValidatorWhitelist {
         self.hotkeys.read().len()
     }
 
+    #[cfg(test)]
+    pub fn insert_for_test(&self, hotkey: &str) {
+        self.hotkeys.write().insert(hotkey.to_string());
+    }
+
     pub async fn refresh_loop(self: Arc<Self>, netuid: u16, min_stake_tao: f64, refresh_secs: u64) {
         let mut interval = tokio::time::interval(Duration::from_secs(refresh_secs));
         loop {

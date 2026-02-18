@@ -193,8 +193,8 @@ async fn submit_batch(
     };
 
     let total_validators = state.validator_whitelist.validator_count();
-    let required =
-        ((total_validators as f64 * state.config.consensus_threshold).ceil() as usize).max(1);
+    let required_f = (total_validators as f64 * state.config.consensus_threshold).ceil();
+    let required = (required_f.min(usize::MAX as f64) as usize).max(1);
 
     let concurrent = query
         .concurrent_tasks

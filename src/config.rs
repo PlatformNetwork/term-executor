@@ -37,6 +37,15 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
+        let consensus_threshold: f64 =
+            env_parse("CONSENSUS_THRESHOLD", DEFAULT_CONSENSUS_THRESHOLD);
+
+        assert!(
+            consensus_threshold > 0.0 && consensus_threshold <= 1.0,
+            "CONSENSUS_THRESHOLD must be in range (0.0, 1.0], got {}",
+            consensus_threshold
+        );
+
         Self {
             port: env_parse("PORT", DEFAULT_PORT),
             session_ttl_secs: env_parse("SESSION_TTL_SECS", DEFAULT_SESSION_TTL),
@@ -58,7 +67,7 @@ impl Config {
                 "VALIDATOR_REFRESH_SECS",
                 DEFAULT_VALIDATOR_REFRESH_SECS,
             ),
-            consensus_threshold: env_parse("CONSENSUS_THRESHOLD", DEFAULT_CONSENSUS_THRESHOLD),
+            consensus_threshold,
             consensus_ttl_secs: env_parse("CONSENSUS_TTL_SECS", DEFAULT_CONSENSUS_TTL_SECS),
         }
     }
@@ -118,5 +127,21 @@ mod tests {
     #[test]
     fn test_env_parse_fallback() {
         assert_eq!(env_parse::<u16>("NONEXISTENT_VAR_XYZ", 42), 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "CONSENSUS_THRESHOLD must be in range")]
+    fn test_config_rejects_zero_threshold() {
+        std::env::set_var("CONSENSUS_THRESHOLD", "0.0");
+        let _cfg = Config::from_env();
+        std::env::remove_var("CONSENSUS_THRESHOLD");
+    }
+
+    #[test]
+    #[should_panic(expected = "CONSENSUS_THRESHOLD must be in range")]
+    fn test_config_rejects_threshold_above_one() {
+        std::env::set_var("CONSENSUS_THRESHOLD", "1.5");
+        let _cfg = Config::from_env();
+        std::env::remove_var("CONSENSUS_THRESHOLD");
     }
 }

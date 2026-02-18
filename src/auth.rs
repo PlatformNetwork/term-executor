@@ -8,6 +8,10 @@ use tracing::warn;
 const NONCE_TTL: Duration = Duration::from_secs(300);
 const NONCE_REAP_INTERVAL: Duration = Duration::from_secs(60);
 
+const MAX_HOTKEY_LEN: usize = 128;
+const MAX_NONCE_LEN: usize = 256;
+const MAX_SIGNATURE_LEN: usize = 256;
+
 pub struct NonceStore {
     seen: DashMap<String, Instant>,
 }
@@ -20,11 +24,14 @@ impl NonceStore {
     }
 
     pub fn check_and_insert(&self, nonce: &str) -> bool {
-        if self.seen.contains_key(nonce) {
-            return false;
+        use dashmap::mapref::entry::Entry;
+        match self.seen.entry(nonce.to_string()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(Instant::now());
+                true
+            }
         }
-        self.seen.insert(nonce.to_string(), Instant::now());
-        true
     }
 
     pub async fn reaper_loop(self: Arc<Self>) {
@@ -48,18 +55,21 @@ pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeade
         .get("X-Hotkey")
         .or_else(|| headers.get("x-hotkey"))
         .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() <= MAX_HOTKEY_LEN)
         .map(|s| s.to_string())?;
 
     let nonce = headers
         .get("X-Nonce")
         .or_else(|| headers.get("x-nonce"))
         .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() <= MAX_NONCE_LEN)
         .map(|s| s.to_string())?;
 
     let signature = headers
         .get("X-Signature")
         .or_else(|| headers.get("x-signature"))
         .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() <= MAX_SIGNATURE_LEN)
         .map(|s| s.to_string())?;
 
     Some(AuthHeaders {
@@ -82,13 +92,13 @@ pub fn verify_request(
         return Err(AuthError::InvalidHotkey);
     }
 
-    if !nonce_store.check_and_insert(&auth.nonce) {
-        return Err(AuthError::NonceReused);
-    }
-
     let message = format!("{}{}", auth.hotkey, auth.nonce);
     if !verify_sr25519_signature(&auth.hotkey, &message, &auth.signature) {
         return Err(AuthError::InvalidSignature);
+    }
+
+    if !nonce_store.check_and_insert(&auth.nonce) {
+        return Err(AuthError::NonceReused);
     }
 
     Ok(())
@@ -262,6 +272,46 @@ mod tests {
         };
         let err = verify_request(&auth, &store, &wl).unwrap_err();
         assert!(matches!(err, AuthError::UnauthorizedHotkey));
+    }
+
+    #[test]
+    fn test_nonce_not_burned_on_invalid_signature() {
+        let store = NonceStore::new();
+        let wl = ValidatorWhitelist::new();
+        wl.insert_for_test(TEST_SS58);
+
+        let auth = AuthHeaders {
+            hotkey: TEST_SS58.to_string(),
+            nonce: "nonce-should-survive".to_string(),
+            signature: "0x".to_string() + &"00".repeat(64),
+        };
+        let err = verify_request(&auth, &store, &wl).unwrap_err();
+        assert!(matches!(err, AuthError::InvalidSignature));
+
+        assert!(
+            store.check_and_insert("nonce-should-survive"),
+            "Nonce must not be consumed when signature verification fails"
+        );
+    }
+
+    #[test]
+    fn test_extract_auth_headers_rejects_oversized_nonce() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        let long_nonce = "x".repeat(MAX_NONCE_LEN + 1);
+        headers.insert("X-Nonce", long_nonce.parse().unwrap());
+        headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_headers_rejects_oversized_signature() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        headers.insert("X-Nonce", "test-nonce".parse().unwrap());
+        let long_sig = "x".repeat(MAX_SIGNATURE_LEN + 1);
+        headers.insert("X-Signature", long_sig.parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
     }
 
     #[test]
