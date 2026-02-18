@@ -16,7 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
-RUN mkdir -p /tmp/sessions
+RUN groupadd --system executor && useradd --system --gid executor --create-home executor \
+    && mkdir -p /tmp/sessions && chown executor:executor /tmp/sessions
+USER executor
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1

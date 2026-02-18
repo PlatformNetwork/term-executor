@@ -171,22 +171,38 @@ fn verify_sr25519_signature(ss58_hotkey: &str, message: &str, signature_hex: &st
         .is_ok()
 }
 
+fn ss58_checksum(data: &[u8]) -> [u8; 2] {
+    use blake2::{digest::consts::U64, Blake2b, Digest};
+    let mut hasher = Blake2b::<U64>::new();
+    hasher.update(b"SS58PRE");
+    hasher.update(data);
+    let result = hasher.finalize();
+    [result[0], result[1]]
+}
+
 fn ss58_to_public_key_bytes(address: &str) -> Option<[u8; 32]> {
     let decoded = bs58::decode(address).into_vec().ok()?;
     // SS58 format: [prefix(1-2 bytes)][public_key(32 bytes)][checksum(2 bytes)]
     // For substrate generic (prefix 42), total = 35 bytes (1 + 32 + 2)
-    if decoded.len() == 35 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded[1..33]);
-        Some(key)
+    let (prefix_len, key_start) = if decoded.len() == 35 {
+        (1, 1)
     } else if decoded.len() == 36 {
-        // Two-byte prefix
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded[2..34]);
-        Some(key)
+        (2, 2)
     } else {
-        None
+        return None;
+    };
+
+    let payload = &decoded[..prefix_len + 32];
+    let expected_checksum = &decoded[prefix_len + 32..];
+    let actual_checksum = ss58_checksum(payload);
+
+    if expected_checksum != actual_checksum {
+        return None;
     }
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&decoded[key_start..key_start + 32]);
+    Some(key)
 }
 
 pub fn validate_ss58(address: &str) -> bool {
@@ -194,18 +210,6 @@ pub fn validate_ss58(address: &str) -> bool {
         return false;
     }
     ss58_to_public_key_bytes(address).is_some()
-}
-
-#[cfg(test)]
-fn sp_ss58_checksum(data: &[u8]) -> [u8; 64] {
-    use sha2::{Digest, Sha512};
-    let mut hasher = Sha512::new();
-    hasher.update(b"SS58PRE");
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut out = [0u8; 64];
-    out.copy_from_slice(&result);
-    out
 }
 
 #[cfg(test)]
@@ -325,8 +329,8 @@ mod tests {
         let mut raw = Vec::with_capacity(35);
         raw.push(42u8);
         raw.extend_from_slice(&pub_key.to_bytes());
-        let hash = sp_ss58_checksum(&raw);
-        raw.extend_from_slice(&hash[..2]);
+        let checksum = ss58_checksum(&raw);
+        raw.extend_from_slice(&checksum);
         let ss58 = bs58::encode(&raw).into_string();
 
         let nonce = "test-nonce-42";
@@ -338,5 +342,14 @@ mod tests {
 
         assert!(verify_sr25519_signature(&ss58, &message, &sig_hex));
         assert!(!verify_sr25519_signature(&ss58, "wrong-message", &sig_hex));
+    }
+
+    #[test]
+    fn test_ss58_rejects_bad_checksum() {
+        let mut decoded = bs58::decode(TEST_SS58).into_vec().unwrap();
+        let last = decoded.len() - 1;
+        decoded[last] ^= 0xFF;
+        let bad_ss58 = bs58::encode(&decoded).into_string();
+        assert!(ss58_to_public_key_bytes(&bad_ss58).is_none());
     }
 }

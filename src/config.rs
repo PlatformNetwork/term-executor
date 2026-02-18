@@ -38,17 +38,18 @@ pub struct Config {
 }
 
 impl Config {
-    pub fn from_env() -> Self {
+    pub fn from_env() -> Result<Self, String> {
         let consensus_threshold: f64 =
             env_parse("CONSENSUS_THRESHOLD", DEFAULT_CONSENSUS_THRESHOLD);
 
-        assert!(
-            consensus_threshold > 0.0 && consensus_threshold <= 1.0,
-            "CONSENSUS_THRESHOLD must be in range (0.0, 1.0], got {}",
-            consensus_threshold
-        );
+        if consensus_threshold <= 0.0 || consensus_threshold > 1.0 {
+            return Err(format!(
+                "CONSENSUS_THRESHOLD must be in range (0.0, 1.0], got {}",
+                consensus_threshold
+            ));
+        }
 
-        Self {
+        Ok(Self {
             port: env_parse("PORT", DEFAULT_PORT),
             session_ttl_secs: env_parse("SESSION_TTL_SECS", DEFAULT_SESSION_TTL),
             max_concurrent_tasks: env_parse("MAX_CONCURRENT_TASKS", DEFAULT_MAX_CONCURRENT),
@@ -75,7 +76,7 @@ impl Config {
                 "MAX_PENDING_CONSENSUS",
                 DEFAULT_MAX_PENDING_CONSENSUS,
             ),
-        }
+        })
     }
 
     pub fn print_banner(&self) {
@@ -123,7 +124,7 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().expect("default config should be valid");
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
         assert_eq!(cfg.bittensor_netuid, 100);
@@ -136,18 +137,24 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "CONSENSUS_THRESHOLD must be in range")]
     fn test_config_rejects_zero_threshold() {
         std::env::set_var("CONSENSUS_THRESHOLD", "0.0");
-        let _cfg = Config::from_env();
+        let result = Config::from_env();
         std::env::remove_var("CONSENSUS_THRESHOLD");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("CONSENSUS_THRESHOLD must be in range"));
     }
 
     #[test]
-    #[should_panic(expected = "CONSENSUS_THRESHOLD must be in range")]
     fn test_config_rejects_threshold_above_one() {
         std::env::set_var("CONSENSUS_THRESHOLD", "1.5");
-        let _cfg = Config::from_env();
+        let result = Config::from_env();
         std::env::remove_var("CONSENSUS_THRESHOLD");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("CONSENSUS_THRESHOLD must be in range"));
     }
 }

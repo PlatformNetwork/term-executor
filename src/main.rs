@@ -22,7 +22,7 @@ async fn main() {
         )
         .init();
 
-    let config = Arc::new(config::Config::from_env());
+    let config = Arc::new(config::Config::from_env().expect("Invalid configuration"));
     config.print_banner();
 
     tokio::fs::create_dir_all(&config.workspace_base)

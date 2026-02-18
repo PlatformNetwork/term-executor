@@ -1,3 +1,4 @@
+use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -52,47 +53,66 @@ impl ConsensusManager {
         required: usize,
         total_validators: usize,
     ) -> ConsensusStatus {
-        let mut entry = self
-            .pending
-            .entry(archive_hash.to_string())
-            .or_insert_with(|| {
-                info!(archive_hash, "New consensus entry created");
-                PendingConsensus {
-                    archive_data,
-                    voters: HashSet::new(),
-                    created_at: Instant::now(),
-                    concurrent_tasks,
+        match self.pending.entry(archive_hash.to_string()) {
+            Entry::Occupied(mut entry) => {
+                let pending = entry.get_mut();
+
+                if pending.voters.contains(hotkey) {
+                    return ConsensusStatus::AlreadyVoted {
+                        votes: pending.voters.len(),
+                        required,
+                        total_validators,
+                    };
                 }
-            });
 
-        if entry.voters.contains(hotkey) {
-            return ConsensusStatus::AlreadyVoted {
-                votes: entry.voters.len(),
-                required,
-                total_validators,
-            };
-        }
+                pending.voters.insert(hotkey.to_string());
+                let votes = pending.voters.len();
 
-        entry.voters.insert(hotkey.to_string());
-        let votes = entry.voters.len();
-
-        if votes >= required {
-            drop(entry);
-            if let Some((_, consensus)) = self.pending.remove(archive_hash) {
-                info!(archive_hash, votes, required, "Consensus reached");
-                return ConsensusStatus::Reached {
-                    archive_data: consensus.archive_data,
-                    concurrent_tasks: consensus.concurrent_tasks,
-                    votes,
-                    required,
-                };
+                if votes >= required {
+                    let (_, consensus) = entry.remove_entry();
+                    info!(archive_hash, votes, required, "Consensus reached");
+                    ConsensusStatus::Reached {
+                        archive_data: consensus.archive_data,
+                        concurrent_tasks: consensus.concurrent_tasks,
+                        votes,
+                        required,
+                    }
+                } else {
+                    ConsensusStatus::Pending {
+                        votes,
+                        required,
+                        total_validators,
+                    }
+                }
             }
-        }
+            Entry::Vacant(entry) => {
+                info!(archive_hash, "New consensus entry created");
+                let mut voters = HashSet::new();
+                voters.insert(hotkey.to_string());
+                let votes = 1;
 
-        ConsensusStatus::Pending {
-            votes,
-            required,
-            total_validators,
+                if votes >= required {
+                    info!(archive_hash, votes, required, "Consensus reached");
+                    ConsensusStatus::Reached {
+                        archive_data,
+                        concurrent_tasks,
+                        votes,
+                        required,
+                    }
+                } else {
+                    entry.insert(PendingConsensus {
+                        archive_data,
+                        voters,
+                        created_at: Instant::now(),
+                        concurrent_tasks,
+                    });
+                    ConsensusStatus::Pending {
+                        votes,
+                        required,
+                        total_validators,
+                    }
+                }
+            }
         }
     }
 
@@ -228,5 +248,21 @@ mod tests {
             },
         );
         assert!(mgr.is_at_capacity());
+    }
+
+    #[test]
+    fn test_single_validator_consensus() {
+        let mgr = ConsensusManager::new(100);
+        let status = mgr.record_vote("hash1", "hotkey1", vec![1, 2, 3], Some(4), 1, 1);
+        assert!(matches!(status, ConsensusStatus::Reached { votes: 1, .. }));
+        assert_eq!(mgr.pending_count(), 0);
+    }
+
+    #[test]
+    fn test_entry_removed_after_consensus() {
+        let mgr = ConsensusManager::new(100);
+        mgr.record_vote("hash1", "hotkey1", vec![1], Some(8), 2, 3);
+        mgr.record_vote("hash1", "hotkey2", vec![1], Some(8), 2, 3);
+        assert_eq!(mgr.pending_count(), 0);
     }
 }

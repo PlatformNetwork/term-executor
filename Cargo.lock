@@ -5642,6 +5642,7 @@ dependencies = [
  "axum",
  "base64",
  "bittensor-rs",
+ "blake2",
  "bs58",
  "chrono",
  "dashmap",
