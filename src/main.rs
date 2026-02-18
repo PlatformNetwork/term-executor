@@ -96,7 +96,13 @@ async fn main() {
     });
 
     info!("Listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
 
     let shutdown = async {
         tokio::signal::ctrl_c()
@@ -105,10 +111,13 @@ async fn main() {
         info!("Shutdown signal received, draining...");
     };
 
-    axum::serve(listener, app)
+    if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .unwrap();
+    {
+        error!("Server error: {}", e);
+        std::process::exit(1);
+    }
 
     info!("Shutdown complete");
 }

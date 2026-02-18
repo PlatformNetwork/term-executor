@@ -9,8 +9,15 @@ const NONCE_TTL: Duration = Duration::from_secs(300);
 const NONCE_REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 const MAX_HOTKEY_LEN: usize = 128;
+const MIN_NONCE_LEN: usize = 1;
 const MAX_NONCE_LEN: usize = 256;
 const MAX_SIGNATURE_LEN: usize = 256;
+
+fn is_valid_nonce(s: &str) -> bool {
+    s.len() >= MIN_NONCE_LEN
+        && s.len() <= MAX_NONCE_LEN
+        && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
 
 pub struct NonceStore {
     seen: DashMap<String, Instant>,
@@ -62,7 +69,7 @@ pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeade
         .get("X-Nonce")
         .or_else(|| headers.get("x-nonce"))
         .and_then(|v| v.to_str().ok())
-        .filter(|s| s.len() <= MAX_NONCE_LEN)
+        .filter(|s| is_valid_nonce(s))
         .map(|s| s.to_string())?;
 
     let signature = headers
@@ -306,6 +313,25 @@ mod tests {
         headers.insert("X-Nonce", long_nonce.parse().unwrap());
         headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
         assert!(extract_auth_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_headers_rejects_empty_nonce() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        headers.insert("X-Nonce", "".parse().unwrap());
+        headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_nonce_validation() {
+        assert!(is_valid_nonce("abc-123_DEF"));
+        assert!(is_valid_nonce("a"));
+        assert!(!is_valid_nonce(""));
+        assert!(!is_valid_nonce(&"x".repeat(MAX_NONCE_LEN + 1)));
+        assert!(!is_valid_nonce("has\ttab"));
+        assert!(!is_valid_nonce("has\nnewline"));
     }
 
     #[test]

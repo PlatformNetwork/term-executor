@@ -9,6 +9,7 @@ use chrono::Utc;
 use serde::Serialize;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use tracing::warn;
 
 use crate::auth::{self, NonceStore};
 use crate::config::Config;
@@ -134,21 +135,40 @@ async fn submit_batch(
         ));
     }
 
+    let max_bytes = state.config.max_archive_bytes;
     let mut archive_data: Option<Vec<u8>> = None;
 
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "archive" || name == "file" {
-            let data = field.bytes().await.map_err(|e| {
+            let mut buf = Vec::new();
+            let mut stream = field;
+            use futures::TryStreamExt;
+            while let Some(chunk) = stream.try_next().await.map_err(|e| {
+                warn!(error = %e, "Failed to read multipart chunk");
                 (
                     StatusCode::BAD_REQUEST,
                     Json(serde_json::json!({
                         "error": "upload_failed",
-                        "message": format!("Failed to read upload: {}", e)
+                        "message": "Failed to read uploaded archive"
                     })),
                 )
-            })?;
-            archive_data = Some(data.to_vec());
+            })? {
+                if buf.len() + chunk.len() > max_bytes {
+                    return Err((
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "archive_too_large",
+                            "message": format!(
+                                "Archive exceeds maximum size of {} bytes",
+                                max_bytes
+                            )
+                        })),
+                    ));
+                }
+                buf.extend_from_slice(&chunk);
+            }
+            archive_data = Some(buf);
         }
     }
 
@@ -161,16 +181,6 @@ async fn submit_batch(
             })),
         )
     })?;
-
-    if archive_bytes.len() > state.config.max_archive_bytes {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({
-                "error": "archive_too_large",
-                "message": format!("Archive is {} bytes, max is {}", archive_bytes.len(), state.config.max_archive_bytes)
-            })),
-        ));
-    }
 
     if state.consensus_manager.is_at_capacity() {
         return Err((
@@ -200,7 +210,6 @@ async fn submit_batch(
     let status = state.consensus_manager.record_vote(
         &archive_hash,
         &auth_headers.hotkey,
-        archive_bytes,
         Some(concurrent),
         required,
         total_validators,
@@ -237,7 +246,6 @@ async fn submit_batch(
             })),
         )),
         ConsensusStatus::Reached {
-            archive_data,
             concurrent_tasks,
             votes,
             required,
@@ -259,14 +267,15 @@ async fn submit_batch(
             let extract_dir = state.config.workspace_base.join("_extract_tmp");
             let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
-            let extracted = crate::task::extract_uploaded_archive(&archive_data, &extract_dir)
+            let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
                 .await
                 .map_err(|e| {
+                    warn!(error = %e, "Failed to extract uploaded archive");
                     (
                         StatusCode::BAD_REQUEST,
                         Json(serde_json::json!({
                             "error": "extraction_failed",
-                            "message": format!("Failed to extract archive: {}", e)
+                            "message": "Failed to extract archive. Ensure it is a valid zip or tar.gz."
                         })),
                     )
                 })?;

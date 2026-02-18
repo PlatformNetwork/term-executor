@@ -37,9 +37,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                 "error": "batch_not_found",
                 "batch_id": batch_id,
             });
-            let _ = sender
-                .send(Message::Text(serde_json::to_string(&err).unwrap()))
-                .await;
+            let msg = serde_json::to_string(&err).unwrap_or_default();
+            let _ = sender.send(Message::Text(msg)).await;
             return;
         }
     };
@@ -65,11 +64,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
     });
     drop(current_state);
 
-    if sender
-        .send(Message::Text(serde_json::to_string(&snapshot).unwrap()))
-        .await
-        .is_err()
-    {
+    let snapshot_json = serde_json::to_string(&snapshot).unwrap_or_default();
+    if sender.send(Message::Text(snapshot_json)).await.is_err() {
         return;
     }
 
@@ -95,9 +91,8 @@ async fn handle_ws(socket: WebSocket, state: Arc<AppState>, batch_id: String) {
                         "event": "stream_closed",
                         "batch_id": batch_id_send,
                     });
-                    let _ = sender
-                        .send(Message::Text(serde_json::to_string(&close_msg).unwrap()))
-                        .await;
+                    let close_json = serde_json::to_string(&close_msg).unwrap_or_default();
+                    let _ = sender.send(Message::Text(close_json)).await;
                     break;
                 }
             }
