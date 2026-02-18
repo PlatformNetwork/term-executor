@@ -53,7 +53,7 @@ ConsensusManager reaper loop (every 30 seconds):
 | `src/main.rs` | Entry point — bootstraps config, session manager, executor, validator whitelist, consensus manager, Axum server, background tasks |
 | `src/config.rs` | `Config` struct loaded from environment variables with defaults; Bittensor and consensus configuration |
 | `src/handlers.rs` | Axum route handlers: `/health`, `/status`, `/metrics`, `/submit`, `/batch/{id}`, `/batch/{id}/tasks`, `/batch/{id}/task/{task_id}`, `/batches` |
-| `src/auth.rs` | Authentication: `extract_auth_headers()`, `verify_request()` (whitelist-based), `validate_ss58()`, sr25519 signature verification via `verify_sr25519_signature()`, `NonceStore` for replay protection, `AuthHeaders`/`AuthError` types |
+| `src/auth.rs` | Authentication: `extract_auth_headers()`, `verify_request()` (whitelist-based), `validate_ss58()`, sr25519 signature verification via `verify_sr25519_signature()`, SS58 checksum via `blake2`, `NonceStore` for replay protection, `AuthHeaders`/`AuthError` types |
 | `src/validator_whitelist.rs` | Dynamic validator whitelist — fetches validators from Bittensor netuid 100 every 5 minutes, filters by stake ≥10k TAO, stores SS58 hotkeys in `parking_lot::RwLock<HashSet>` |
 | `src/consensus.rs` | 50% consensus manager — tracks pending votes per archive hash in `DashMap`, triggers evaluation when ≥50% of whitelisted validators submit same payload, TTL reaper for expired entries |
 | `src/executor.rs` | Core evaluation engine — spawns batch tasks that clone repos, run agents, run tests concurrently |
@@ -83,7 +83,7 @@ ConsensusManager reaper loop (every 30 seconds):
 - **Archive Handling**: `flate2` + `tar` (tar.gz), `zip` 2 (zip)
 - **Error Handling**: `anyhow` 1 + `thiserror` 2
 - **Logging**: `tracing` + `tracing-subscriber` with env-filter
-- **Crypto/Identity**: `sha2`, `hex`, `base64`, `bs58` (SS58 address validation), `schnorrkel` 0.11 (sr25519 signature verification), `rand_core` 0.6, `uuid` v4
+- **Crypto/Identity**: `sha2`, `hex`, `base64`, `bs58` (SS58 address validation), `schnorrkel` 0.11 (sr25519 signature verification), `blake2` 0.10 (SS58 checksum), `rand_core` 0.6, `uuid` v4
 - **Blockchain**: `bittensor-rs` (git dependency) for Bittensor validator whitelisting via subtensor RPC
 - **Time**: `chrono` with serde support
 - **Build Tooling**: `mold` linker via `.cargo/config.toml`, `clang` as linker driver
@@ -187,14 +187,14 @@ Both hooks are activated via `git config core.hooksPath .githooks`.
 | `AGENT_TIMEOUT_SECS` | `600` | Agent execution timeout |
 | `TEST_TIMEOUT_SECS` | `300` | Test suite timeout |
 | `MAX_ARCHIVE_BYTES` | `524288000` | Max uploaded archive size (500MB) |
-| `MAX_OUTPUT_BYTES` | `1048576` | Max captured output per command (1MB) |
 | `WORKSPACE_BASE` | `/tmp/sessions` | Base directory for session workspaces |
 | `BITTENSOR_NETUID` | `100` | Bittensor subnet ID for validator lookup |
 | `MIN_VALIDATOR_STAKE_TAO` | `10000` | Minimum TAO stake for validator whitelisting |
 | `VALIDATOR_REFRESH_SECS` | `300` | Interval for refreshing validator whitelist (seconds) |
 | `CONSENSUS_THRESHOLD` | `0.5` | Fraction of validators required for consensus (0.0–1.0) |
 | `CONSENSUS_TTL_SECS` | `60` | TTL for pending consensus entries (seconds) |
+| `MAX_PENDING_CONSENSUS` | `100` | Maximum number of pending consensus entries |
 
 ## Authentication
 
-Authentication requires three HTTP headers: `X-Hotkey` (SS58 address), `X-Nonce` (unique per-request), and `X-Signature` (sr25519 hex signature of `hotkey + nonce`). The authorized hotkeys are dynamically loaded from the Bittensor blockchain — all validators on netuid 100 with ≥10,000 TAO stake and an active validator permit are whitelisted. The whitelist refreshes every 5 minutes. Verification steps: hotkey must be in the validator whitelist, SS58 format must be valid, nonce must not have been seen before (replay protection via `NonceStore` in `src/auth.rs` with 5-minute TTL), and the sr25519 signature must verify against the hotkey's public key using the Substrate signing context. Only requests passing all checks can submit batches via `POST /submit`. Evaluations are only triggered when ≥50% of whitelisted validators have submitted the same archive payload (identified by SHA-256 hash). All other endpoints are open.
+Authentication requires three HTTP headers: `X-Hotkey` (SS58 address), `X-Nonce` (unique per-request), and `X-Signature` (sr25519 hex signature of `hotkey + nonce`). The authorized hotkeys are dynamically loaded from the Bittensor blockchain — all validators on netuid 100 with ≥10,000 TAO stake and an active validator permit are whitelisted. The whitelist refreshes every 5 minutes. Verification steps (in order): hotkey must be in the validator whitelist, SS58 format must be valid, sr25519 signature must verify against the hotkey's public key using the Substrate signing context, and finally the nonce must not have been seen before (replay protection via `NonceStore` in `src/auth.rs` with 5-minute TTL — nonce is only consumed after signature passes). Only requests passing all checks can submit batches via `POST /submit`. Evaluations are only triggered when ≥50% of whitelisted validators have submitted the same archive payload (identified by SHA-256 hash). All other endpoints are open.
