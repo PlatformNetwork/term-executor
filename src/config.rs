@@ -7,8 +7,6 @@ const DEFAULT_CLONE_TIMEOUT: u64 = 180;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
 const DEFAULT_MAX_ARCHIVE_BYTES: usize = 500 * 1024 * 1024;
-#[allow(dead_code)]
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_WORKSPACE_BASE: &str = "/tmp/sessions";
 const DEFAULT_MAX_PENDING_CONSENSUS: usize = 100;
 const DEFAULT_BITTENSOR_NETUID: u16 = 100;
@@ -26,8 +24,6 @@ pub struct Config {
     pub agent_timeout_secs: u64,
     pub test_timeout_secs: u64,
     pub max_archive_bytes: usize,
-    #[allow(dead_code)]
-    pub max_output_bytes: usize,
     pub workspace_base: PathBuf,
     pub bittensor_netuid: u16,
     pub min_validator_stake_tao: f64,
@@ -57,7 +53,6 @@ impl Config {
             agent_timeout_secs: env_parse("AGENT_TIMEOUT_SECS", DEFAULT_AGENT_TIMEOUT),
             test_timeout_secs: env_parse("TEST_TIMEOUT_SECS", DEFAULT_TEST_TIMEOUT),
             max_archive_bytes: env_parse("MAX_ARCHIVE_BYTES", DEFAULT_MAX_ARCHIVE_BYTES),
-            max_output_bytes: env_parse("MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
             workspace_base: PathBuf::from(
                 std::env::var("WORKSPACE_BASE").unwrap_or_else(|_| DEFAULT_WORKSPACE_BASE.into()),
             ),
