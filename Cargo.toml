@@ -1,6 +1,6 @@
 [package]
 name = "term-executor"
-version = "1.2.0"
+version = "2.0.0"
 edition = "2021"
 description = "Attested SWE-bench evaluation executor for term-challenge miners"
 authors = ["Platform Network"]
