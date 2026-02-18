@@ -90,12 +90,8 @@ async fn metrics(State(state): State<Arc<AppState>>) -> Response {
 
 #[derive(serde::Deserialize)]
 struct SubmitQuery {
-    #[serde(default = "default_concurrent")]
+    #[serde(default)]
     concurrent_tasks: Option<usize>,
-}
-
-fn default_concurrent() -> Option<usize> {
-    None
 }
 
 async fn submit_batch(

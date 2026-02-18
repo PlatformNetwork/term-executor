@@ -7,7 +7,6 @@ const DEFAULT_CLONE_TIMEOUT: u64 = 180;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
 const DEFAULT_MAX_ARCHIVE_BYTES: usize = 500 * 1024 * 1024;
-#[allow(dead_code)]
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_WORKSPACE_BASE: &str = "/tmp/sessions";
 const DEFAULT_BITTENSOR_NETUID: u16 = 100;
