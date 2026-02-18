@@ -1,3 +1,4 @@
+use anyhow::Context;
 use parking_lot::RwLock;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -69,11 +70,11 @@ impl ValidatorWhitelist {
 
         let client = bittensor_rs::BittensorClient::with_failover()
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to connect to subtensor: {}", e))?;
+            .context("Failed to connect to subtensor")?;
 
         let metagraph = bittensor_rs::sync_metagraph(&client, netuid)
             .await
-            .map_err(|e| anyhow::anyhow!("Failed to sync metagraph: {}", e))?;
+            .context("Failed to sync metagraph")?;
 
         let mut new_hotkeys = HashSet::new();
         for neuron in metagraph.neurons.values() {

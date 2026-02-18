@@ -7,8 +7,10 @@ const DEFAULT_CLONE_TIMEOUT: u64 = 180;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
 const DEFAULT_MAX_ARCHIVE_BYTES: usize = 500 * 1024 * 1024;
+#[allow(dead_code)]
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_WORKSPACE_BASE: &str = "/tmp/sessions";
+const DEFAULT_MAX_PENDING_CONSENSUS: usize = 100;
 const DEFAULT_BITTENSOR_NETUID: u16 = 100;
 const DEFAULT_MIN_VALIDATOR_STAKE_TAO: f64 = 10_000.0;
 const DEFAULT_VALIDATOR_REFRESH_SECS: u64 = 300;
@@ -32,6 +34,7 @@ pub struct Config {
     pub validator_refresh_secs: u64,
     pub consensus_threshold: f64,
     pub consensus_ttl_secs: u64,
+    pub max_pending_consensus: usize,
 }
 
 impl Config {
@@ -68,6 +71,10 @@ impl Config {
             ),
             consensus_threshold,
             consensus_ttl_secs: env_parse("CONSENSUS_TTL_SECS", DEFAULT_CONSENSUS_TTL_SECS),
+            max_pending_consensus: env_parse(
+                "MAX_PENDING_CONSENSUS",
+                DEFAULT_MAX_PENDING_CONSENSUS,
+            ),
         }
     }
 

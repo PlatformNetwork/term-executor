@@ -39,7 +39,7 @@ async fn main() {
     ));
 
     let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
-    let consensus_manager = consensus::ConsensusManager::new(100);
+    let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
 
     let state = Arc::new(handlers::AppState {
         config: config.clone(),
