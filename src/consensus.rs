@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tracing::{debug, info};
 
+const REAPER_INTERVAL_SECS: u64 = 30;
+
 struct PendingConsensus {
     archive_data: Vec<u8>,
     voters: HashSet<String>,
@@ -126,7 +128,7 @@ impl ConsensusManager {
     }
 
     pub async fn reaper_loop(self: Arc<Self>, ttl_secs: u64) {
-        let mut interval = tokio::time::interval(Duration::from_secs(30));
+        let mut interval = tokio::time::interval(Duration::from_secs(REAPER_INTERVAL_SECS));
         loop {
             interval.tick().await;
             let cutoff = Instant::now() - Duration::from_secs(ttl_secs);

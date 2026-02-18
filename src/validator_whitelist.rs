@@ -5,6 +5,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tracing::{info, warn};
 
+const MAX_REFRESH_RETRIES: u32 = 3;
+const BACKOFF_BASE_SECS: u64 = 2;
+
 pub struct ValidatorWhitelist {
     hotkeys: RwLock<HashSet<String>>,
 }
@@ -39,9 +42,9 @@ impl ValidatorWhitelist {
 
     async fn refresh_once(&self, netuid: u16, min_stake_tao: f64) {
         let mut last_err = None;
-        for attempt in 0..3u32 {
+        for attempt in 0..MAX_REFRESH_RETRIES {
             if attempt > 0 {
-                let delay = Duration::from_secs(2u64.pow(attempt));
+                let delay = Duration::from_secs(BACKOFF_BASE_SECS.pow(attempt));
                 tokio::time::sleep(delay).await;
             }
             match self.try_refresh(netuid, min_stake_tao).await {
@@ -59,10 +62,12 @@ impl ValidatorWhitelist {
                 }
             }
         }
-        warn!(
-            error = %last_err.unwrap_or_else(|| anyhow::anyhow!("unknown")),
-            "All retry attempts failed for validator whitelist refresh, keeping cached whitelist"
-        );
+        if let Some(err) = last_err {
+            warn!(
+                error = %err,
+                "All retry attempts failed for validator whitelist refresh, keeping cached whitelist"
+            );
+        }
     }
 
     async fn try_refresh(&self, netuid: u16, min_stake_tao: f64) -> anyhow::Result<usize> {

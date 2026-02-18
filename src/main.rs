@@ -11,7 +11,7 @@ mod validator_whitelist;
 mod ws;
 
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
@@ -22,7 +22,13 @@ async fn main() {
         )
         .init();
 
-    let config = Arc::new(config::Config::from_env().expect("Invalid configuration"));
+    let config = match config::Config::from_env() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            error!("Invalid configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
     config.print_banner();
 
     tokio::fs::create_dir_all(&config.workspace_base)
