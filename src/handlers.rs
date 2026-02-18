@@ -17,6 +17,10 @@ use crate::metrics::Metrics;
 use crate::session::SessionManager;
 use crate::ws;
 
+use crate::consensus::{ConsensusManager, ConsensusStatus};
+use crate::validator_whitelist::ValidatorWhitelist;
+use sha2::{Digest, Sha256};
+
 pub struct AppState {
     pub config: Arc<Config>,
     pub sessions: Arc<SessionManager>,
@@ -24,6 +28,8 @@ pub struct AppState {
     pub executor: Arc<Executor>,
     pub nonce_store: Arc<NonceStore>,
     pub started_at: chrono::DateTime<Utc>,
+    pub validator_whitelist: Arc<ValidatorWhitelist>,
+    pub consensus_manager: Arc<ConsensusManager>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
@@ -103,31 +109,31 @@ async fn submit_batch(
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
                 "error": "missing_auth",
-                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature, X-Api-Key"
+                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature"
             })),
         )
     })?;
 
+    if state.validator_whitelist.validator_count() == 0 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "whitelist_not_ready",
+                "message": "Validator whitelist not yet initialized. Please retry shortly."
+            })),
+        ));
+    }
+
     if let Err(e) = auth::verify_request(
         &auth_headers,
         &state.nonce_store,
-        &state.config.worker_api_key,
+        &state.validator_whitelist,
     ) {
         return Err((
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({
                 "error": e.code(),
                 "message": e.message(),
-            })),
-        ));
-    }
-
-    if state.sessions.has_active_batch() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(serde_json::json!({
-                "error": "busy",
-                "message": "A batch is already running. Wait for it to complete."
             })),
         ));
     }
@@ -170,43 +176,129 @@ async fn submit_batch(
         ));
     }
 
-    let extract_dir = state.config.workspace_base.join("_extract_tmp");
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    if state.consensus_manager.is_at_capacity() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "too_many_pending",
+                "message": "Too many pending consensus entries. Please retry later."
+            })),
+        ));
+    }
 
-    let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({
-                    "error": "extraction_failed",
-                    "message": format!("Failed to extract archive: {}", e)
-                })),
-            )
-        })?;
+    let archive_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&archive_bytes);
+        hex::encode(hasher.finalize())
+    };
 
-    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let total_validators = state.validator_whitelist.validator_count();
+    let required =
+        ((total_validators as f64 * state.config.consensus_threshold).ceil() as usize).max(1);
 
-    let total_tasks = extracted.tasks.len();
     let concurrent = query
         .concurrent_tasks
         .unwrap_or(state.config.max_concurrent_tasks)
         .min(state.config.max_concurrent_tasks);
 
-    let batch = state.sessions.create_batch(total_tasks);
-    let batch_id = batch.id.clone();
+    let status = state.consensus_manager.record_vote(
+        &archive_hash,
+        &auth_headers.hotkey,
+        archive_bytes,
+        Some(concurrent),
+        required,
+        total_validators,
+    );
 
-    state.executor.spawn_batch(batch, extracted, concurrent);
+    match status {
+        ConsensusStatus::Pending {
+            votes,
+            required,
+            total_validators,
+        } => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "pending_consensus",
+                "archive_hash": archive_hash,
+                "votes": votes,
+                "required": required,
+                "total_validators": total_validators,
+            })),
+        )),
+        ConsensusStatus::AlreadyVoted {
+            votes,
+            required,
+            total_validators,
+        } => Ok((
+            StatusCode::ACCEPTED,
+            Json(serde_json::json!({
+                "status": "pending_consensus",
+                "archive_hash": archive_hash,
+                "votes": votes,
+                "required": required,
+                "total_validators": total_validators,
+                "note": "Your vote was already recorded",
+            })),
+        )),
+        ConsensusStatus::Reached {
+            archive_data,
+            concurrent_tasks,
+            votes,
+            required,
+        } => {
+            let effective_concurrent = concurrent_tasks
+                .unwrap_or(state.config.max_concurrent_tasks)
+                .min(state.config.max_concurrent_tasks);
 
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({
-            "batch_id": batch_id,
-            "total_tasks": total_tasks,
-            "concurrent_tasks": concurrent,
-            "ws_url": format!("/ws?batch_id={}", batch_id),
-        })),
-    ))
+            if state.sessions.has_active_batch() {
+                return Err((
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(serde_json::json!({
+                        "error": "busy",
+                        "message": "A batch is already running. Wait for it to complete."
+                    })),
+                ));
+            }
+
+            let extract_dir = state.config.workspace_base.join("_extract_tmp");
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+            let extracted = crate::task::extract_uploaded_archive(&archive_data, &extract_dir)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "extraction_failed",
+                            "message": format!("Failed to extract archive: {}", e)
+                        })),
+                    )
+                })?;
+
+            let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+            let total_tasks = extracted.tasks.len();
+            let batch = state.sessions.create_batch(total_tasks);
+            let batch_id = batch.id.clone();
+
+            state
+                .executor
+                .spawn_batch(batch, extracted, effective_concurrent);
+
+            Ok((
+                StatusCode::ACCEPTED,
+                Json(serde_json::json!({
+                    "batch_id": batch_id,
+                    "total_tasks": total_tasks,
+                    "concurrent_tasks": effective_concurrent,
+                    "ws_url": format!("/ws?batch_id={}", batch_id),
+                    "consensus_reached": true,
+                    "votes": votes,
+                    "required": required,
+                })),
+            ))
+        }
+    }
 }
 
 async fn get_batch(

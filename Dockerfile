@@ -1,8 +1,9 @@
 # ── Build stage ──
 FROM rust:1.93-slim-bookworm AS builder
 RUN apt-get update -qq && apt-get install -y -qq --no-install-recommends \
-    pkg-config libssl-dev && rm -rf /var/lib/apt/lists/*
+    pkg-config libssl-dev protobuf-compiler cmake clang mold && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
+COPY .cargo ./.cargo
 COPY Cargo.toml Cargo.lock ./
 COPY src ./src
 RUN cargo build --release && strip target/release/term-executor

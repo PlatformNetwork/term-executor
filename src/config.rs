@@ -10,8 +10,11 @@ const DEFAULT_MAX_ARCHIVE_BYTES: usize = 500 * 1024 * 1024;
 #[allow(dead_code)]
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_WORKSPACE_BASE: &str = "/tmp/sessions";
-
-pub const AUTHORIZED_HOTKEY: &str = "5GziQCcRpN8NCJktX343brnfuVe3w6gUYieeStXPD1Dag2At";
+const DEFAULT_BITTENSOR_NETUID: u16 = 100;
+const DEFAULT_MIN_VALIDATOR_STAKE_TAO: f64 = 10_000.0;
+const DEFAULT_VALIDATOR_REFRESH_SECS: u64 = 300;
+const DEFAULT_CONSENSUS_THRESHOLD: f64 = 0.5;
+const DEFAULT_CONSENSUS_TTL_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -25,7 +28,11 @@ pub struct Config {
     #[allow(dead_code)]
     pub max_output_bytes: usize,
     pub workspace_base: PathBuf,
-    pub worker_api_key: String,
+    pub bittensor_netuid: u16,
+    pub min_validator_stake_tao: f64,
+    pub validator_refresh_secs: u64,
+    pub consensus_threshold: f64,
+    pub consensus_ttl_secs: u64,
 }
 
 impl Config {
@@ -42,8 +49,17 @@ impl Config {
             workspace_base: PathBuf::from(
                 std::env::var("WORKSPACE_BASE").unwrap_or_else(|_| DEFAULT_WORKSPACE_BASE.into()),
             ),
-            worker_api_key: std::env::var("WORKER_API_KEY")
-                .expect("WORKER_API_KEY environment variable must be set"),
+            bittensor_netuid: env_parse("BITTENSOR_NETUID", DEFAULT_BITTENSOR_NETUID),
+            min_validator_stake_tao: env_parse(
+                "MIN_VALIDATOR_STAKE_TAO",
+                DEFAULT_MIN_VALIDATOR_STAKE_TAO,
+            ),
+            validator_refresh_secs: env_parse(
+                "VALIDATOR_REFRESH_SECS",
+                DEFAULT_VALIDATOR_REFRESH_SECS,
+            ),
+            consensus_threshold: env_parse("CONSENSUS_THRESHOLD", DEFAULT_CONSENSUS_THRESHOLD),
+            consensus_ttl_secs: env_parse("CONSENSUS_TTL_SECS", DEFAULT_CONSENSUS_TTL_SECS),
         }
     }
 
@@ -55,7 +71,17 @@ impl Config {
         );
         tracing::info!("╠══════════════════════════════════════════════════╣");
         tracing::info!("║  Port:              {:<28}║", self.port);
-        tracing::info!("║  Authorized hotkey: {}...║", &AUTHORIZED_HOTKEY[..10]);
+        tracing::info!("║  Bittensor netuid:  {:<28}║", self.bittensor_netuid);
+        tracing::info!(
+            "║  Min stake (TAO):   {:<28}║",
+            self.min_validator_stake_tao
+        );
+        tracing::info!(
+            "║  Whitelist refresh: {:<25}s ║",
+            self.validator_refresh_secs
+        );
+        tracing::info!("║  Consensus thresh:  {:<28}║", self.consensus_threshold);
+        tracing::info!("║  Consensus TTL:     {:<25}s ║", self.consensus_ttl_secs);
         tracing::info!("║  Max concurrent:    {:<28}║", self.max_concurrent_tasks);
         tracing::info!("║  Session TTL:       {:<25}s ║", self.session_ttl_secs);
         tracing::info!("║  Clone timeout:     {:<25}s ║", self.clone_timeout_secs);
@@ -65,7 +91,6 @@ impl Config {
             "║  Workspace:         {:<28}║",
             self.workspace_base.display()
         );
-        tracing::info!("║  API key:           {:<28}║", "configured");
         tracing::info!("╚══════════════════════════════════════════════════╝");
     }
 }
@@ -83,21 +108,15 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        std::env::set_var("WORKER_API_KEY", "test-api-key-123");
         let cfg = Config::from_env();
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
-        assert_eq!(cfg.worker_api_key, "test-api-key-123");
+        assert_eq!(cfg.bittensor_netuid, 100);
+        assert!((cfg.consensus_threshold - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
     fn test_env_parse_fallback() {
         assert_eq!(env_parse::<u16>("NONEXISTENT_VAR_XYZ", 42), 42);
-    }
-
-    #[test]
-    fn test_authorized_hotkey_valid() {
-        assert!(AUTHORIZED_HOTKEY.starts_with("5G"));
-        assert_eq!(AUTHORIZED_HOTKEY.len(), 48);
     }
 }

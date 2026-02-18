@@ -11,29 +11,51 @@ This is a **single-crate Rust binary** (`term-executor`) built with Axum. There 
 ### Data Flow
 
 ```
-Client → POST /submit (multipart archive) → term-executor
-  1. Authenticate via X-Hotkey, X-Nonce, X-Signature, X-Api-Key headers
-  2. Extract uploaded archive (zip/tar.gz) containing tasks/ and agent_code/
-  3. Parse each task: workspace.yaml, prompt.md, tests/
-  4. For each task (concurrently, up to limit):
-     a. git clone the target repository at base_commit
-     b. Run install commands (pip install, etc.)
-     c. Write & execute agent code in the repo
-     d. Write test source files into the repo
-     e. Run test scripts (bash), collect exit codes
-  5. Aggregate results (reward per task, aggregate reward)
-  6. Stream progress via WebSocket (GET /ws?batch_id=...)
-  7. Return results via GET /batch/{id}
+Validator → POST /submit (multipart archive) → term-executor
+  1. Authenticate via X-Hotkey, X-Nonce, X-Signature headers
+  2. Verify hotkey is in the dynamic validator whitelist (Bittensor netuid 100, >10k TAO stake)
+  3. Compute SHA-256 hash of archive bytes
+  4. Record vote in ConsensusManager
+  5. If <50% of whitelisted validators have voted for this hash:
+     → Return 202 Accepted with pending_consensus status
+  6. If ≥50% consensus reached:
+     a. Extract uploaded archive (zip/tar.gz) containing tasks/ and agent_code/
+     b. Parse each task: workspace.yaml, prompt.md, tests/
+     c. For each task (concurrently, up to limit):
+        i.   git clone the target repository at base_commit
+        ii.  Run install commands (pip install, etc.)
+        iii. Write & execute agent code in the repo
+        iv.  Write test source files into the repo
+        v.   Run test scripts (bash), collect exit codes
+     d. Aggregate results (reward per task, aggregate reward)
+     e. Stream progress via WebSocket (GET /ws?batch_id=...)
+     f. Return results via GET /batch/{id}
+```
+
+### Background Tasks
+
+```
+ValidatorWhitelist refresh loop (every 5 minutes):
+  1. Connect to Bittensor subtensor via BittensorClient::with_failover()
+  2. Sync metagraph for netuid 100
+  3. Filter validators: validator_permit && active && stake >= 10,000 TAO
+  4. Atomically replace whitelist with new set of SS58 hotkeys
+  5. On failure: retry up to 3 times with exponential backoff, keep cached whitelist
+
+ConsensusManager reaper loop (every 30 seconds):
+  1. Remove pending consensus entries older than TTL (default 60s)
 ```
 
 ### Module Map
 
 | File | Responsibility |
 |---|---|
-| `src/main.rs` | Entry point — bootstraps config, session manager, executor, Axum server, reaper tasks |
-| `src/config.rs` | `Config` struct loaded from environment variables with defaults; `AUTHORIZED_HOTKEY` constant |
+| `src/main.rs` | Entry point — bootstraps config, session manager, executor, validator whitelist, consensus manager, Axum server, background tasks |
+| `src/config.rs` | `Config` struct loaded from environment variables with defaults; Bittensor and consensus configuration |
 | `src/handlers.rs` | Axum route handlers: `/health`, `/status`, `/metrics`, `/submit`, `/batch/{id}`, `/batch/{id}/tasks`, `/batch/{id}/task/{task_id}`, `/batches` |
-| `src/auth.rs` | Authentication: `extract_auth_headers()`, `verify_request()`, `validate_ss58()`, sr25519 signature verification via `verify_sr25519_signature()`, `NonceStore` for replay protection, `AuthHeaders`/`AuthError` types |
+| `src/auth.rs` | Authentication: `extract_auth_headers()`, `verify_request()` (whitelist-based), `validate_ss58()`, sr25519 signature verification via `verify_sr25519_signature()`, `NonceStore` for replay protection, `AuthHeaders`/`AuthError` types |
+| `src/validator_whitelist.rs` | Dynamic validator whitelist — fetches validators from Bittensor netuid 100 every 5 minutes, filters by stake ≥10k TAO, stores SS58 hotkeys in `parking_lot::RwLock<HashSet>` |
+| `src/consensus.rs` | 50% consensus manager — tracks pending votes per archive hash in `DashMap`, triggers evaluation when ≥50% of whitelisted validators submit same payload, TTL reaper for expired entries |
 | `src/executor.rs` | Core evaluation engine — spawns batch tasks that clone repos, run agents, run tests concurrently |
 | `src/session.rs` | `SessionManager` with `DashMap`, `Batch`, `BatchResult`, `TaskResult`, `BatchStatus`, `TaskStatus`, `WsEvent` types |
 | `src/task.rs` | Archive extraction (zip/tar.gz), task directory parsing, agent code loading, language detection |
@@ -43,8 +65,10 @@ Client → POST /submit (multipart archive) → term-executor
 
 ### Key Shared State (via `Arc`)
 
-- `AppState` (in `handlers.rs`) holds `Config`, `SessionManager`, `Metrics`, `Executor`, `NonceStore`, `started_at`
+- `AppState` (in `handlers.rs`) holds `Config`, `SessionManager`, `Metrics`, `Executor`, `NonceStore`, `started_at`, `ValidatorWhitelist`, `ConsensusManager`
 - `SessionManager` uses `DashMap<String, Arc<Batch>>` for lock-free concurrent access
+- `ValidatorWhitelist` uses `parking_lot::RwLock<HashSet<String>>` for concurrent read access with rare writes
+- `ConsensusManager` uses `DashMap<String, PendingConsensus>` for lock-free concurrent vote tracking
 - Per-batch `Semaphore` in `executor.rs` controls concurrent tasks within a batch (configurable, default: 8)
 - `broadcast::Sender<WsEvent>` per batch for WebSocket event streaming
 
@@ -60,6 +84,7 @@ Client → POST /submit (multipart archive) → term-executor
 - **Error Handling**: `anyhow` 1 + `thiserror` 2
 - **Logging**: `tracing` + `tracing-subscriber` with env-filter
 - **Crypto/Identity**: `sha2`, `hex`, `base64`, `bs58` (SS58 address validation), `schnorrkel` 0.11 (sr25519 signature verification), `rand_core` 0.6, `uuid` v4
+- **Blockchain**: `bittensor-rs` (git dependency) for Bittensor validator whitelisting via subtensor RPC
 - **Time**: `chrono` with serde support
 - **Build Tooling**: `mold` linker via `.cargo/config.toml`, `clang` as linker driver
 - **Container**: Multi-stage Dockerfile — `rust:1.93-slim-bookworm` builder → `debian:bookworm-slim` runtime (includes python3, pip, venv, build-essential, git, curl)
@@ -71,13 +96,13 @@ Client → POST /submit (multipart archive) → term-executor
 
 2. **All clippy warnings are errors.** Run `cargo +nightly clippy --all-targets -- -D warnings` locally. CI runs the same command and will fail on any warning.
 
-3. **Never expose secrets in logs or responses.** The `AUTHORIZED_HOTKEY` in `src/config.rs` is the only authorized SS58 hotkey. Auth failures log only the rejection, never the submitted hotkey value. Follow this pattern for any new secrets.
+3. **Never expose secrets in logs or responses.** Auth failures log only the rejection, never the submitted hotkey value. Follow this pattern for any new secrets.
 
 4. **All process execution MUST have timeouts.** Every call to `run_cmd`/`run_shell` in `src/executor.rs` takes a `Duration` timeout. Never spawn a child process without a timeout — agent code is untrusted and may hang forever.
 
 5. **Output MUST be truncated.** The `truncate_output()` function in `src/executor.rs` caps output at `MAX_OUTPUT` (1MB). Any new command output capture must use this function to prevent memory exhaustion from malicious agent output.
 
-6. **Shared state must use `Arc` + lock-free structures.** `SessionManager` uses `DashMap` (not `Mutex<HashMap>`). Metrics use `AtomicU64`. New shared state should follow these patterns — never use `std::sync::Mutex` for hot-path data.
+6. **Shared state must use `Arc` + lock-free structures.** `SessionManager` uses `DashMap` (not `Mutex<HashMap>`). Metrics use `AtomicU64`. `ValidatorWhitelist` uses `parking_lot::RwLock`. `ConsensusManager` uses `DashMap`. New shared state should follow these patterns — never use `std::sync::Mutex` for hot-path data.
 
 7. **Semaphore must gate task concurrency.** The per-batch `Semaphore` in `executor.rs` limits concurrent tasks within a batch. The `SessionManager::has_active_batch()` check prevents multiple batches from running simultaneously.
 
@@ -164,8 +189,12 @@ Both hooks are activated via `git config core.hooksPath .githooks`.
 | `MAX_ARCHIVE_BYTES` | `524288000` | Max uploaded archive size (500MB) |
 | `MAX_OUTPUT_BYTES` | `1048576` | Max captured output per command (1MB) |
 | `WORKSPACE_BASE` | `/tmp/sessions` | Base directory for session workspaces |
-| `WORKER_API_KEY` | *(required)* | API key that whitelisted hotkeys must provide via `X-Api-Key` header |
+| `BITTENSOR_NETUID` | `100` | Bittensor subnet ID for validator lookup |
+| `MIN_VALIDATOR_STAKE_TAO` | `10000` | Minimum TAO stake for validator whitelisting |
+| `VALIDATOR_REFRESH_SECS` | `300` | Interval for refreshing validator whitelist (seconds) |
+| `CONSENSUS_THRESHOLD` | `0.5` | Fraction of validators required for consensus (0.0–1.0) |
+| `CONSENSUS_TTL_SECS` | `60` | TTL for pending consensus entries (seconds) |
 
 ## Authentication
 
-Authentication requires four HTTP headers: `X-Hotkey` (SS58 address), `X-Nonce` (unique per-request), `X-Signature` (sr25519 hex signature of `hotkey + nonce`), and `X-Api-Key`. The authorized hotkey is hardcoded as `AUTHORIZED_HOTKEY` in `src/config.rs`. The API key is configured via the `WORKER_API_KEY` environment variable (required). Verification steps: hotkey must match `AUTHORIZED_HOTKEY`, API key must match, SS58 format must be valid, nonce must not have been seen before (replay protection via `NonceStore` in `src/auth.rs` with 5-minute TTL), and the sr25519 signature must verify against the hotkey's public key using the Substrate signing context. Only requests passing all checks can submit batches via `POST /submit`. All other endpoints are open.
+Authentication requires three HTTP headers: `X-Hotkey` (SS58 address), `X-Nonce` (unique per-request), and `X-Signature` (sr25519 hex signature of `hotkey + nonce`). The authorized hotkeys are dynamically loaded from the Bittensor blockchain — all validators on netuid 100 with ≥10,000 TAO stake and an active validator permit are whitelisted. The whitelist refreshes every 5 minutes. Verification steps: hotkey must be in the validator whitelist, SS58 format must be valid, nonce must not have been seen before (replay protection via `NonceStore` in `src/auth.rs` with 5-minute TTL), and the sr25519 signature must verify against the hotkey's public key using the Substrate signing context. Only requests passing all checks can submit batches via `POST /submit`. Evaluations are only triggered when ≥50% of whitelisted validators have submitted the same archive payload (identified by SHA-256 hash). All other endpoints are open.
