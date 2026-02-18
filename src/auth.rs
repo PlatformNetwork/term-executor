@@ -1,4 +1,4 @@
-use crate::config::AUTHORIZED_HOTKEY;
+use crate::validator_whitelist::ValidatorWhitelist;
 use dashmap::DashMap;
 use schnorrkel::{PublicKey, Signature};
 use std::sync::Arc;
@@ -7,6 +7,17 @@ use tracing::warn;
 
 const NONCE_TTL: Duration = Duration::from_secs(300);
 const NONCE_REAP_INTERVAL: Duration = Duration::from_secs(60);
+
+const MAX_HOTKEY_LEN: usize = 128;
+const MIN_NONCE_LEN: usize = 1;
+const MAX_NONCE_LEN: usize = 256;
+const MAX_SIGNATURE_LEN: usize = 256;
+
+fn is_valid_nonce(s: &str) -> bool {
+    s.len() >= MIN_NONCE_LEN
+        && s.len() <= MAX_NONCE_LEN
+        && s.bytes().all(|b| b.is_ascii_graphic() || b == b' ')
+}
 
 pub struct NonceStore {
     seen: DashMap<String, Instant>,
@@ -20,11 +31,14 @@ impl NonceStore {
     }
 
     pub fn check_and_insert(&self, nonce: &str) -> bool {
-        if self.seen.contains_key(nonce) {
-            return false;
+        use dashmap::mapref::entry::Entry;
+        match self.seen.entry(nonce.to_string()) {
+            Entry::Occupied(_) => false,
+            Entry::Vacant(v) => {
+                v.insert(Instant::now());
+                true
+            }
         }
-        self.seen.insert(nonce.to_string(), Instant::now());
-        true
     }
 
     pub async fn reaper_loop(self: Arc<Self>) {
@@ -41,7 +55,6 @@ pub struct AuthHeaders {
     pub hotkey: String,
     pub nonce: String,
     pub signature: String,
-    pub api_key: String,
 }
 
 pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeaders> {
@@ -49,58 +62,50 @@ pub fn extract_auth_headers(headers: &axum::http::HeaderMap) -> Option<AuthHeade
         .get("X-Hotkey")
         .or_else(|| headers.get("x-hotkey"))
         .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() <= MAX_HOTKEY_LEN)
         .map(|s| s.to_string())?;
 
     let nonce = headers
         .get("X-Nonce")
         .or_else(|| headers.get("x-nonce"))
         .and_then(|v| v.to_str().ok())
+        .filter(|s| is_valid_nonce(s))
         .map(|s| s.to_string())?;
 
     let signature = headers
         .get("X-Signature")
         .or_else(|| headers.get("x-signature"))
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string())?;
-
-    let api_key = headers
-        .get("X-Api-Key")
-        .or_else(|| headers.get("x-api-key"))
-        .and_then(|v| v.to_str().ok())
+        .filter(|s| s.len() <= MAX_SIGNATURE_LEN)
         .map(|s| s.to_string())?;
 
     Some(AuthHeaders {
         hotkey,
         nonce,
         signature,
-        api_key,
     })
 }
 
 pub fn verify_request(
     auth: &AuthHeaders,
     nonce_store: &NonceStore,
-    expected_api_key: &str,
+    whitelist: &ValidatorWhitelist,
 ) -> Result<(), AuthError> {
-    if auth.hotkey != AUTHORIZED_HOTKEY {
+    if !whitelist.is_whitelisted(&auth.hotkey) {
         return Err(AuthError::UnauthorizedHotkey);
-    }
-
-    if auth.api_key != expected_api_key {
-        return Err(AuthError::InvalidApiKey);
     }
 
     if !validate_ss58(&auth.hotkey) {
         return Err(AuthError::InvalidHotkey);
     }
 
-    if !nonce_store.check_and_insert(&auth.nonce) {
-        return Err(AuthError::NonceReused);
-    }
-
     let message = format!("{}{}", auth.hotkey, auth.nonce);
     if !verify_sr25519_signature(&auth.hotkey, &message, &auth.signature) {
         return Err(AuthError::InvalidSignature);
+    }
+
+    if !nonce_store.check_and_insert(&auth.nonce) {
+        return Err(AuthError::NonceReused);
     }
 
     Ok(())
@@ -110,7 +115,6 @@ pub fn verify_request(
 pub enum AuthError {
     UnauthorizedHotkey,
     InvalidHotkey,
-    InvalidApiKey,
     NonceReused,
     InvalidSignature,
 }
@@ -120,7 +124,6 @@ impl AuthError {
         match self {
             AuthError::UnauthorizedHotkey => "Hotkey is not authorized",
             AuthError::InvalidHotkey => "Invalid SS58 hotkey format",
-            AuthError::InvalidApiKey => "Invalid API key",
             AuthError::NonceReused => "Nonce has already been used",
             AuthError::InvalidSignature => "Signature verification failed",
         }
@@ -130,7 +133,6 @@ impl AuthError {
         match self {
             AuthError::UnauthorizedHotkey => "unauthorized_hotkey",
             AuthError::InvalidHotkey => "invalid_hotkey",
-            AuthError::InvalidApiKey => "invalid_api_key",
             AuthError::NonceReused => "nonce_reused",
             AuthError::InvalidSignature => "invalid_signature",
         }
@@ -176,22 +178,38 @@ fn verify_sr25519_signature(ss58_hotkey: &str, message: &str, signature_hex: &st
         .is_ok()
 }
 
+fn ss58_checksum(data: &[u8]) -> [u8; 2] {
+    use blake2::{digest::consts::U64, Blake2b, Digest};
+    let mut hasher = Blake2b::<U64>::new();
+    hasher.update(b"SS58PRE");
+    hasher.update(data);
+    let result = hasher.finalize();
+    [result[0], result[1]]
+}
+
 fn ss58_to_public_key_bytes(address: &str) -> Option<[u8; 32]> {
     let decoded = bs58::decode(address).into_vec().ok()?;
     // SS58 format: [prefix(1-2 bytes)][public_key(32 bytes)][checksum(2 bytes)]
     // For substrate generic (prefix 42), total = 35 bytes (1 + 32 + 2)
-    if decoded.len() == 35 {
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded[1..33]);
-        Some(key)
+    let (prefix_len, key_start) = if decoded.len() == 35 {
+        (1, 1)
     } else if decoded.len() == 36 {
-        // Two-byte prefix
-        let mut key = [0u8; 32];
-        key.copy_from_slice(&decoded[2..34]);
-        Some(key)
+        (2, 2)
     } else {
-        None
+        return None;
+    };
+
+    let payload = &decoded[..prefix_len + 32];
+    let expected_checksum = &decoded[prefix_len + 32..];
+    let actual_checksum = ss58_checksum(payload);
+
+    if expected_checksum != actual_checksum {
+        return None;
     }
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&decoded[key_start..key_start + 32]);
+    Some(key)
 }
 
 pub fn validate_ss58(address: &str) -> bool {
@@ -202,24 +220,14 @@ pub fn validate_ss58(address: &str) -> bool {
 }
 
 #[cfg(test)]
-fn sp_ss58_checksum(data: &[u8]) -> [u8; 64] {
-    use sha2::{Digest, Sha512};
-    let mut hasher = Sha512::new();
-    hasher.update(b"SS58PRE");
-    hasher.update(data);
-    let result = hasher.finalize();
-    let mut out = [0u8; 64];
-    out.copy_from_slice(&result);
-    out
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
+    const TEST_SS58: &str = "5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY";
+
     #[test]
     fn test_validate_ss58_valid() {
-        assert!(validate_ss58(AUTHORIZED_HOTKEY));
+        assert!(validate_ss58(TEST_SS58));
     }
 
     #[test]
@@ -231,7 +239,7 @@ mod tests {
 
     #[test]
     fn test_ss58_to_public_key_bytes() {
-        let bytes = ss58_to_public_key_bytes(AUTHORIZED_HOTKEY);
+        let bytes = ss58_to_public_key_bytes(TEST_SS58);
         assert!(bytes.is_some());
         assert_eq!(bytes.unwrap().len(), 32);
     }
@@ -247,17 +255,15 @@ mod tests {
     #[test]
     fn test_extract_auth_headers_present() {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert("X-Hotkey", AUTHORIZED_HOTKEY.parse().unwrap());
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
         headers.insert("X-Nonce", "test-nonce-123".parse().unwrap());
         headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
-        headers.insert("X-Api-Key", "my-secret-key".parse().unwrap());
         let auth = extract_auth_headers(&headers);
         assert!(auth.is_some());
         let auth = auth.unwrap();
-        assert_eq!(auth.hotkey, AUTHORIZED_HOTKEY);
+        assert_eq!(auth.hotkey, TEST_SS58);
         assert_eq!(auth.nonce, "test-nonce-123");
         assert_eq!(auth.signature, "0xdeadbeef");
-        assert_eq!(auth.api_key, "my-secret-key");
     }
 
     #[test]
@@ -267,37 +273,74 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_request_unauthorized_hotkey() {
+    fn test_verify_request_non_whitelisted() {
         let store = NonceStore::new();
+        let wl = ValidatorWhitelist::new();
         let auth = AuthHeaders {
             hotkey: "5InvalidHotkey".to_string(),
             nonce: "nonce-1".to_string(),
             signature: "0x00".to_string(),
-            api_key: "test-key".to_string(),
         };
-        let err = verify_request(&auth, &store, "test-key").unwrap_err();
+        let err = verify_request(&auth, &store, &wl).unwrap_err();
         assert!(matches!(err, AuthError::UnauthorizedHotkey));
     }
 
     #[test]
-    fn test_verify_request_invalid_api_key() {
+    fn test_nonce_not_burned_on_invalid_signature() {
         let store = NonceStore::new();
+        let wl = ValidatorWhitelist::new();
+        wl.insert_for_test(TEST_SS58);
+
         let auth = AuthHeaders {
-            hotkey: AUTHORIZED_HOTKEY.to_string(),
-            nonce: "nonce-1".to_string(),
-            signature: "0x00".to_string(),
-            api_key: "wrong-key".to_string(),
+            hotkey: TEST_SS58.to_string(),
+            nonce: "nonce-should-survive".to_string(),
+            signature: "0x".to_string() + &"00".repeat(64),
         };
-        let err = verify_request(&auth, &store, "correct-key").unwrap_err();
-        assert!(matches!(err, AuthError::InvalidApiKey));
+        let err = verify_request(&auth, &store, &wl).unwrap_err();
+        assert!(matches!(err, AuthError::InvalidSignature));
+
+        assert!(
+            store.check_and_insert("nonce-should-survive"),
+            "Nonce must not be consumed when signature verification fails"
+        );
     }
 
     #[test]
-    fn test_extract_auth_headers_missing_api_key() {
+    fn test_extract_auth_headers_rejects_oversized_nonce() {
         let mut headers = axum::http::HeaderMap::new();
-        headers.insert("X-Hotkey", AUTHORIZED_HOTKEY.parse().unwrap());
-        headers.insert("X-Nonce", "test-nonce-123".parse().unwrap());
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        let long_nonce = "x".repeat(MAX_NONCE_LEN + 1);
+        headers.insert("X-Nonce", long_nonce.parse().unwrap());
         headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_extract_auth_headers_rejects_empty_nonce() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        headers.insert("X-Nonce", "".parse().unwrap());
+        headers.insert("X-Signature", "0xdeadbeef".parse().unwrap());
+        assert!(extract_auth_headers(&headers).is_none());
+    }
+
+    #[test]
+    fn test_nonce_validation() {
+        assert!(is_valid_nonce("abc-123_DEF"));
+        assert!(is_valid_nonce("a"));
+        assert!(!is_valid_nonce(""));
+        assert!(!is_valid_nonce(&"x".repeat(MAX_NONCE_LEN + 1)));
+        assert!(!is_valid_nonce("has\ttab"));
+        assert!(!is_valid_nonce("has\nnewline"));
+    }
+
+    #[test]
+    fn test_extract_auth_headers_rejects_oversized_signature() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("X-Hotkey", TEST_SS58.parse().unwrap());
+        headers.insert("X-Nonce", "test-nonce".parse().unwrap());
+        let long_sig = "x".repeat(MAX_SIGNATURE_LEN + 1);
+        headers.insert("X-Signature", long_sig.parse().unwrap());
         assert!(extract_auth_headers(&headers).is_none());
     }
 
@@ -309,12 +352,11 @@ mod tests {
         let keypair: Keypair = mini_key.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519);
         let pub_key = keypair.public;
 
-        // Encode as SS58 (prefix 42 = generic substrate)
         let mut raw = Vec::with_capacity(35);
         raw.push(42u8);
         raw.extend_from_slice(&pub_key.to_bytes());
-        let hash = sp_ss58_checksum(&raw);
-        raw.extend_from_slice(&hash[..2]);
+        let checksum = ss58_checksum(&raw);
+        raw.extend_from_slice(&checksum);
         let ss58 = bs58::encode(&raw).into_string();
 
         let nonce = "test-nonce-42";
@@ -326,5 +368,14 @@ mod tests {
 
         assert!(verify_sr25519_signature(&ss58, &message, &sig_hex));
         assert!(!verify_sr25519_signature(&ss58, "wrong-message", &sig_hex));
+    }
+
+    #[test]
+    fn test_ss58_rejects_bad_checksum() {
+        let mut decoded = bs58::decode(TEST_SS58).into_vec().unwrap();
+        let last = decoded.len() - 1;
+        decoded[last] ^= 0xFF;
+        let bad_ss58 = bs58::encode(&decoded).into_string();
+        assert!(ss58_to_public_key_bytes(&bad_ss58).is_none());
     }
 }

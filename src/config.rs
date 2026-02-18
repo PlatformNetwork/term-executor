@@ -7,11 +7,13 @@ const DEFAULT_CLONE_TIMEOUT: u64 = 180;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
 const DEFAULT_MAX_ARCHIVE_BYTES: usize = 500 * 1024 * 1024;
-#[allow(dead_code)]
-const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 const DEFAULT_WORKSPACE_BASE: &str = "/tmp/sessions";
-
-pub const AUTHORIZED_HOTKEY: &str = "5GziQCcRpN8NCJktX343brnfuVe3w6gUYieeStXPD1Dag2At";
+const DEFAULT_MAX_PENDING_CONSENSUS: usize = 100;
+const DEFAULT_BITTENSOR_NETUID: u16 = 100;
+const DEFAULT_MIN_VALIDATOR_STAKE_TAO: f64 = 10_000.0;
+const DEFAULT_VALIDATOR_REFRESH_SECS: u64 = 300;
+const DEFAULT_CONSENSUS_THRESHOLD: f64 = 0.5;
+const DEFAULT_CONSENSUS_TTL_SECS: u64 = 60;
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -22,15 +24,28 @@ pub struct Config {
     pub agent_timeout_secs: u64,
     pub test_timeout_secs: u64,
     pub max_archive_bytes: usize,
-    #[allow(dead_code)]
-    pub max_output_bytes: usize,
     pub workspace_base: PathBuf,
-    pub worker_api_key: String,
+    pub bittensor_netuid: u16,
+    pub min_validator_stake_tao: f64,
+    pub validator_refresh_secs: u64,
+    pub consensus_threshold: f64,
+    pub consensus_ttl_secs: u64,
+    pub max_pending_consensus: usize,
 }
 
 impl Config {
-    pub fn from_env() -> Self {
-        Self {
+    pub fn from_env() -> Result<Self, String> {
+        let consensus_threshold: f64 =
+            env_parse("CONSENSUS_THRESHOLD", DEFAULT_CONSENSUS_THRESHOLD);
+
+        if consensus_threshold <= 0.0 || consensus_threshold > 1.0 {
+            return Err(format!(
+                "CONSENSUS_THRESHOLD must be in range (0.0, 1.0], got {}",
+                consensus_threshold
+            ));
+        }
+
+        Ok(Self {
             port: env_parse("PORT", DEFAULT_PORT),
             session_ttl_secs: env_parse("SESSION_TTL_SECS", DEFAULT_SESSION_TTL),
             max_concurrent_tasks: env_parse("MAX_CONCURRENT_TASKS", DEFAULT_MAX_CONCURRENT),
@@ -38,13 +53,25 @@ impl Config {
             agent_timeout_secs: env_parse("AGENT_TIMEOUT_SECS", DEFAULT_AGENT_TIMEOUT),
             test_timeout_secs: env_parse("TEST_TIMEOUT_SECS", DEFAULT_TEST_TIMEOUT),
             max_archive_bytes: env_parse("MAX_ARCHIVE_BYTES", DEFAULT_MAX_ARCHIVE_BYTES),
-            max_output_bytes: env_parse("MAX_OUTPUT_BYTES", DEFAULT_MAX_OUTPUT_BYTES),
             workspace_base: PathBuf::from(
                 std::env::var("WORKSPACE_BASE").unwrap_or_else(|_| DEFAULT_WORKSPACE_BASE.into()),
             ),
-            worker_api_key: std::env::var("WORKER_API_KEY")
-                .expect("WORKER_API_KEY environment variable must be set"),
-        }
+            bittensor_netuid: env_parse("BITTENSOR_NETUID", DEFAULT_BITTENSOR_NETUID),
+            min_validator_stake_tao: env_parse(
+                "MIN_VALIDATOR_STAKE_TAO",
+                DEFAULT_MIN_VALIDATOR_STAKE_TAO,
+            ),
+            validator_refresh_secs: env_parse(
+                "VALIDATOR_REFRESH_SECS",
+                DEFAULT_VALIDATOR_REFRESH_SECS,
+            ),
+            consensus_threshold,
+            consensus_ttl_secs: env_parse("CONSENSUS_TTL_SECS", DEFAULT_CONSENSUS_TTL_SECS),
+            max_pending_consensus: env_parse(
+                "MAX_PENDING_CONSENSUS",
+                DEFAULT_MAX_PENDING_CONSENSUS,
+            ),
+        })
     }
 
     pub fn print_banner(&self) {
@@ -55,7 +82,17 @@ impl Config {
         );
         tracing::info!("╠══════════════════════════════════════════════════╣");
         tracing::info!("║  Port:              {:<28}║", self.port);
-        tracing::info!("║  Authorized hotkey: {}...║", &AUTHORIZED_HOTKEY[..10]);
+        tracing::info!("║  Bittensor netuid:  {:<28}║", self.bittensor_netuid);
+        tracing::info!(
+            "║  Min stake (TAO):   {:<28}║",
+            self.min_validator_stake_tao
+        );
+        tracing::info!(
+            "║  Whitelist refresh: {:<25}s ║",
+            self.validator_refresh_secs
+        );
+        tracing::info!("║  Consensus thresh:  {:<28}║", self.consensus_threshold);
+        tracing::info!("║  Consensus TTL:     {:<25}s ║", self.consensus_ttl_secs);
         tracing::info!("║  Max concurrent:    {:<28}║", self.max_concurrent_tasks);
         tracing::info!("║  Session TTL:       {:<25}s ║", self.session_ttl_secs);
         tracing::info!("║  Clone timeout:     {:<25}s ║", self.clone_timeout_secs);
@@ -65,7 +102,6 @@ impl Config {
             "║  Workspace:         {:<28}║",
             self.workspace_base.display()
         );
-        tracing::info!("║  API key:           {:<28}║", "configured");
         tracing::info!("╚══════════════════════════════════════════════════╝");
     }
 }
@@ -83,11 +119,11 @@ mod tests {
 
     #[test]
     fn test_config_defaults() {
-        std::env::set_var("WORKER_API_KEY", "test-api-key-123");
-        let cfg = Config::from_env();
+        let cfg = Config::from_env().expect("default config should be valid");
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
-        assert_eq!(cfg.worker_api_key, "test-api-key-123");
+        assert_eq!(cfg.bittensor_netuid, 100);
+        assert!((cfg.consensus_threshold - 0.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -96,8 +132,24 @@ mod tests {
     }
 
     #[test]
-    fn test_authorized_hotkey_valid() {
-        assert!(AUTHORIZED_HOTKEY.starts_with("5G"));
-        assert_eq!(AUTHORIZED_HOTKEY.len(), 48);
+    fn test_config_rejects_zero_threshold() {
+        std::env::set_var("CONSENSUS_THRESHOLD", "0.0");
+        let result = Config::from_env();
+        std::env::remove_var("CONSENSUS_THRESHOLD");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("CONSENSUS_THRESHOLD must be in range"));
+    }
+
+    #[test]
+    fn test_config_rejects_threshold_above_one() {
+        std::env::set_var("CONSENSUS_THRESHOLD", "1.5");
+        let result = Config::from_env();
+        std::env::remove_var("CONSENSUS_THRESHOLD");
+        assert!(result.is_err());
+        assert!(result
+            .unwrap_err()
+            .contains("CONSENSUS_THRESHOLD must be in range"));
     }
 }

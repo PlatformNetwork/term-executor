@@ -1,31 +1,43 @@
 mod auth;
 mod cleanup;
 mod config;
+mod consensus;
 mod executor;
 mod handlers;
 mod metrics;
 mod session;
 mod task;
+mod validator_whitelist;
 mod ws;
 
 use std::sync::Arc;
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
+    let default_directive = "term_executor=info"
+        .parse()
+        .unwrap_or_else(|_| tracing_subscriber::filter::Directive::from(tracing::Level::INFO));
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("term_executor=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_directive),
         )
         .init();
 
-    let config = Arc::new(config::Config::from_env());
+    let config = match config::Config::from_env() {
+        Ok(c) => Arc::new(c),
+        Err(e) => {
+            error!("Invalid configuration: {}", e);
+            std::process::exit(1);
+        }
+    };
     config.print_banner();
 
-    tokio::fs::create_dir_all(&config.workspace_base)
-        .await
-        .expect("Failed to create workspace directory");
+    if let Err(e) = tokio::fs::create_dir_all(&config.workspace_base).await {
+        error!("Failed to create workspace directory: {}", e);
+        std::process::exit(1);
+    }
 
     let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
     let metrics_store = metrics::Metrics::new();
@@ -36,6 +48,9 @@ async fn main() {
         metrics_store.clone(),
     ));
 
+    let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
+    let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
+
     let state = Arc::new(handlers::AppState {
         config: config.clone(),
         sessions: sessions.clone(),
@@ -43,6 +58,8 @@ async fn main() {
         executor,
         nonce_store: nonce_store.clone(),
         started_at: chrono::Utc::now(),
+        validator_whitelist: validator_whitelist.clone(),
+        consensus_manager: consensus_manager.clone(),
     });
 
     let app = handlers::router(state);
@@ -68,20 +85,44 @@ async fn main() {
         }
     });
 
+    let wl = validator_whitelist.clone();
+    let netuid = config.bittensor_netuid;
+    let min_stake = config.min_validator_stake_tao;
+    let refresh_secs = config.validator_refresh_secs;
+    tokio::spawn(async move {
+        wl.refresh_loop(netuid, min_stake, refresh_secs).await;
+    });
+
+    let cm = consensus_manager.clone();
+    let consensus_ttl = config.consensus_ttl_secs;
+    tokio::spawn(async move {
+        cm.reaper_loop(consensus_ttl).await;
+    });
+
     info!("Listening on {}", addr);
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            error!("Failed to bind to {}: {}", addr, e);
+            std::process::exit(1);
+        }
+    };
 
     let shutdown = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install CTRL+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to install CTRL+C handler: {}", e);
+            return;
+        }
         info!("Shutdown signal received, draining...");
     };
 
-    axum::serve(listener, app)
+    if let Err(e) = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown)
         .await
-        .unwrap();
+    {
+        error!("Server error: {}", e);
+        std::process::exit(1);
+    }
 
     info!("Shutdown complete");
 }

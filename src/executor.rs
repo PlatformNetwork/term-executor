@@ -186,7 +186,17 @@ async fn run_batch(
         let cancel_rx = batch.cancel.subscribe();
 
         let handle = tokio::spawn(async move {
-            let _permit = semaphore.acquire().await.unwrap();
+            let _permit = match semaphore.acquire().await {
+                Ok(p) => p,
+                Err(_) => {
+                    warn!(task_id = %task.id, "Semaphore closed, skipping task");
+                    let mut result = TaskResult::new(task.id.clone());
+                    result.status = TaskStatus::Failed;
+                    result.error = Some("Semaphore closed".to_string());
+                    task_results.lock().await.push(result);
+                    return;
+                }
+            };
 
             let task_id = task.id.clone();
             let _ = events_tx.send(crate::session::WsEvent {
