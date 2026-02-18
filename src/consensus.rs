@@ -68,10 +68,10 @@ impl ConsensusManager {
                 let votes = pending.voters.len();
 
                 if votes >= required {
-                    let (_, _consensus) = entry.remove_entry();
+                    let (_, consensus) = entry.remove_entry();
                     info!(archive_hash, votes, required, "Consensus reached");
                     ConsensusStatus::Reached {
-                        concurrent_tasks: _consensus.concurrent_tasks,
+                        concurrent_tasks: consensus.concurrent_tasks,
                         votes,
                         required,
                     }
