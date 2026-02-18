@@ -15,10 +15,13 @@ use tracing::{error, info};
 
 #[tokio::main]
 async fn main() {
+    let default_directive = "term_executor=info"
+        .parse()
+        .unwrap_or_else(|_| tracing_subscriber::filter::Directive::from(tracing::Level::INFO));
+
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("term_executor=info".parse().unwrap()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(default_directive),
         )
         .init();
 
@@ -31,9 +34,10 @@ async fn main() {
     };
     config.print_banner();
 
-    tokio::fs::create_dir_all(&config.workspace_base)
-        .await
-        .expect("Failed to create workspace directory");
+    if let Err(e) = tokio::fs::create_dir_all(&config.workspace_base).await {
+        error!("Failed to create workspace directory: {}", e);
+        std::process::exit(1);
+    }
 
     let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
     let metrics_store = metrics::Metrics::new();
@@ -105,9 +109,10 @@ async fn main() {
     };
 
     let shutdown = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("Failed to install CTRL+C handler");
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            error!("Failed to install CTRL+C handler: {}", e);
+            return;
+        }
         info!("Shutdown signal received, draining...");
     };
 
