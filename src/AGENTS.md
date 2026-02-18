@@ -6,11 +6,15 @@ This is a single-crate binary. All source files live in `src/` with no sub-modul
 
 ```
 main.rs
-  ├── config.rs      (Config::from_env, AUTHORIZED_HOTKEY)
+  ├── config.rs      (Config::from_env, Bittensor/consensus settings)
   ├── auth.rs        (NonceStore created in main, reaper_loop spawned from main)
+  ├── validator_whitelist.rs (ValidatorWhitelist created in main, refresh_loop spawned)
+  ├── consensus.rs   (ConsensusManager created in main, reaper_loop spawned)
   ├── handlers.rs     (Axum router + AppState)
   │     ├── auth.rs   (extract_auth_headers + verify_request for /submit)
-  │     ├── executor.rs (spawned from submit handler)
+  │     ├── validator_whitelist.rs (whitelist check in verify_request)
+  │     ├── consensus.rs (record_vote + consensus check in /submit)
+  │     ├── executor.rs (spawned from submit handler on consensus reached)
   │     │     ├── task.rs (extract, parse, load tasks)
   │     │     ├── session.rs (BatchResult/TaskResult mutation)
   │     │     └── cleanup.rs (work dir removal)
@@ -24,8 +28,8 @@ main.rs
 ## File-by-File Guide
 
 ### `main.rs`
-- Entry point. Initializes tracing, config, session manager, metrics, executor.
-- Creates `AppState`, builds Axum router, spawns background tasks (session reaper, nonce reaper, stale dir reaper).
+- Entry point. Initializes tracing, config, session manager, metrics, executor, validator whitelist, consensus manager.
+- Creates `AppState`, builds Axum router, spawns background tasks (session reaper, nonce reaper, stale dir reaper, validator whitelist refresh loop, consensus TTL reaper).
 - Binds to `0.0.0.0:{PORT}` with graceful shutdown on CTRL+C.
 - **Convention**: Background tasks are spawned with `tokio::spawn` and run indefinitely.
 
@@ -33,26 +37,45 @@ main.rs
 - `Config` struct with all environment-driven settings.
 - `Config::from_env()` reads env vars with `env_parse()` helper (returns default on missing/invalid).
 - `Config::print_banner()` logs a formatted startup banner.
-- `AUTHORIZED_HOTKEY` — hardcoded SS58 hotkey constant for authentication.
+- Includes Bittensor settings: `bittensor_netuid`, `min_validator_stake_tao`, `validator_refresh_secs`.
+- Includes consensus settings: `consensus_threshold`, `consensus_ttl_secs`.
 - **Convention**: Add new config fields here, with a `DEFAULT_*` constant and an env var name. Always provide a sensible default.
 
+### `validator_whitelist.rs`
+- `ValidatorWhitelist` — stores `parking_lot::RwLock<HashSet<String>>` of SS58 hotkey strings.
+- `new()` → returns `Arc<Self>` with empty whitelist.
+- `is_whitelisted(ss58_hotkey)` → checks if hotkey is in the whitelist.
+- `validator_count()` → returns number of whitelisted validators.
+- `refresh_loop(netuid, min_stake_tao, refresh_secs)` → background task that refreshes every N seconds.
+- `refresh_once()` → retries up to 3 times with exponential backoff; on failure, keeps cached whitelist.
+- `try_refresh()` → connects via `BittensorClient::with_failover()`, syncs metagraph, filters validators by permit + active + stake, atomically replaces whitelist.
+- **Convention**: The whitelist starts empty and is populated by the first successful refresh. If the whitelist is empty, all POST /submit requests are rejected with 503.
+
+### `consensus.rs`
+- `ConsensusManager` — `DashMap<String, PendingConsensus>` keyed by SHA-256 hex hash of archive bytes.
+- `PendingConsensus` — holds archive data, voter set, creation time, concurrent_tasks setting.
+- `record_vote()` — adds a validator's vote for an archive hash; returns `ConsensusStatus` (Pending, Reached, AlreadyVoted).
+- `is_at_capacity()` — checks if max pending entries reached (prevents memory exhaustion).
+- `reaper_loop(ttl_secs)` — background task that removes expired entries every 30 seconds.
+- **Convention**: Consensus entries have a 60-second TTL. Max 100 pending entries. Duplicate votes from the same validator are silently acknowledged.
+
 ### `handlers.rs`
-- Defines `AppState` struct (`config`, `sessions`, `metrics`, `executor`, `nonce_store`, `started_at`).
+- Defines `AppState` struct (`config`, `sessions`, `metrics`, `executor`, `nonce_store`, `started_at`, `validator_whitelist`, `consensus_manager`).
 - `router()` builds the Axum `Router` with all routes and shared state.
 - Route handlers: `health`, `status`, `metrics`, `submit_batch`, `get_batch`, `get_batch_tasks`, `get_task`, `list_batches`.
 - Routes: `GET /health`, `GET /status`, `GET /metrics`, `POST /submit`, `GET /batch/{id}`, `GET /batch/{id}/tasks`, `GET /batch/{id}/task/{task_id}`, `GET /batches`, `GET /ws`.
-- `submit_batch` handler does: auth header extraction → `verify_request` (hotkey + API key + nonce + signature) → busy check → multipart upload → archive extraction → batch creation → executor spawn.
+- `submit_batch` handler does: auth header extraction → whitelist empty check (503) → `verify_request` (whitelist + nonce + signature) → multipart upload → SHA-256 hash → consensus vote → if pending: return 202 with vote count → if reached: archive extraction → batch creation → executor spawn.
 - **Convention**: Return `Result<impl IntoResponse, (StatusCode, Json<Value>)>` from handlers that can fail. Use `Json(serde_json::json!({...}))` for responses.
 
 ### `auth.rs`
 - `NonceStore` — `DashMap`-backed nonce tracker with 5-minute TTL and background reaper loop for replay protection.
-- `AuthHeaders` — struct holding `hotkey`, `nonce`, `signature`, `api_key` extracted from request headers.
-- `extract_auth_headers(headers)` — reads `X-Hotkey`, `X-Nonce`, `X-Signature`, `X-Api-Key` headers from request.
-- `verify_request(auth, nonce_store, expected_api_key)` — full auth pipeline: hotkey match → API key match → SS58 validation → nonce replay check → sr25519 signature verification.
+- `AuthHeaders` — struct holding `hotkey`, `nonce`, `signature` extracted from request headers.
+- `extract_auth_headers(headers)` — reads `X-Hotkey`, `X-Nonce`, `X-Signature` headers from request.
+- `verify_request(auth, nonce_store, whitelist)` — full auth pipeline: whitelist check → SS58 validation → nonce replay check → sr25519 signature verification.
 - `validate_ss58(address)` — validates SS58 address format using `bs58`.
 - `verify_sr25519_signature(ss58_hotkey, message, signature_hex)` — verifies an sr25519 signature using `schnorrkel` with the Substrate signing context.
-- `AuthError` — enum with `UnauthorizedHotkey`, `InvalidHotkey`, `InvalidApiKey`, `NonceReused`, `InvalidSignature` variants, each with `.code()` and `.message()` methods.
-- **Convention**: Auth is mandatory — `POST /submit` requires all four headers (`X-Hotkey`, `X-Nonce`, `X-Signature`, `X-Api-Key`). The signed message is `hotkey + nonce`.
+- `AuthError` — enum with `UnauthorizedHotkey`, `InvalidHotkey`, `NonceReused`, `InvalidSignature` variants, each with `.code()` and `.message()` methods.
+- **Convention**: Auth is mandatory — `POST /submit` requires three headers (`X-Hotkey`, `X-Nonce`, `X-Signature`). The signed message is `hotkey + nonce`.
 
 ### `executor.rs`
 - `Executor::spawn_batch(batch, archive, concurrent_limit)` — spawns a tokio task that runs all tasks in the batch.

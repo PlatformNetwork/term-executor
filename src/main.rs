@@ -1,11 +1,13 @@
 mod auth;
 mod cleanup;
 mod config;
+mod consensus;
 mod executor;
 mod handlers;
 mod metrics;
 mod session;
 mod task;
+mod validator_whitelist;
 mod ws;
 
 use std::sync::Arc;
@@ -36,6 +38,9 @@ async fn main() {
         metrics_store.clone(),
     ));
 
+    let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
+    let consensus_manager = consensus::ConsensusManager::new(100);
+
     let state = Arc::new(handlers::AppState {
         config: config.clone(),
         sessions: sessions.clone(),
@@ -43,6 +48,8 @@ async fn main() {
         executor,
         nonce_store: nonce_store.clone(),
         started_at: chrono::Utc::now(),
+        validator_whitelist: validator_whitelist.clone(),
+        consensus_manager: consensus_manager.clone(),
     });
 
     let app = handlers::router(state);
@@ -66,6 +73,20 @@ async fn main() {
             interval.tick().await;
             cleanup::reap_stale_sessions(&workspace, ttl).await;
         }
+    });
+
+    let wl = validator_whitelist.clone();
+    let netuid = config.bittensor_netuid;
+    let min_stake = config.min_validator_stake_tao;
+    let refresh_secs = config.validator_refresh_secs;
+    tokio::spawn(async move {
+        wl.refresh_loop(netuid, min_stake, refresh_secs).await;
+    });
+
+    let cm = consensus_manager.clone();
+    let consensus_ttl = config.consensus_ttl_secs;
+    tokio::spawn(async move {
+        cm.reaper_loop(consensus_ttl).await;
     });
 
     info!("Listening on {}", addr);
