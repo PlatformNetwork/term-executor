@@ -111,7 +111,6 @@ impl<C: ServerChallenge + 'static> Orchestrator<C> {
             let challenge = Arc::clone(&self.challenge);
             let sem = Arc::clone(&semaphore);
             let timeout_secs = self.timeout_secs;
-            let _challenge_id = self.challenge.challenge_id().to_string();
 
             let handle = tokio::spawn(async move {
                 let _permit = sem
