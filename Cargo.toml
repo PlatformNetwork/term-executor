@@ -76,5 +76,3 @@ tokio-test = "0.4"
 [patch.crates-io]
 w3f-bls = { git = "https://github.com/opentensor/bls", branch = "fix-no-std" }
 
-[patch."https://github.com/PlatformNetwork/platform-v2"]
-platform-challenge-sdk = { path = "../platform-v2/crates/challenge-sdk" }
