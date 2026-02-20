@@ -1,3 +1,10 @@
+# [2.1.0](https://github.com/PlatformNetwork/term-executor/compare/v2.0.0...v2.1.0) (2026-02-20)
+
+
+### Features
+
+* integrate HuggingFace dataset handler with task/evaluation system ([db3ba95](https://github.com/PlatformNetwork/term-executor/commit/db3ba957c0f15cac899197e2e0455a8cf9ea39f9))
+
 # [2.0.0](https://github.com/PlatformNetwork/term-executor/compare/v1.2.0...v2.0.0) (2026-02-18)
 
 

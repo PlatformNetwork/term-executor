@@ -1,7 +1,16 @@
+#[allow(dead_code)]
+pub mod config;
+#[allow(dead_code)]
+pub mod registry;
+#[allow(dead_code)]
+pub mod types;
+
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use tracing::{debug, info};
+
+pub use types::SweForgeTaskFields;
 
 const MAX_ARCHIVE_SIZE: usize = 500 * 1024 * 1024;
 
@@ -24,6 +33,8 @@ pub struct SweForgeTask {
     pub prompt: String,
     pub test_scripts: Vec<(String, String)>,
     pub test_source_files: Vec<(String, String)>,
+    #[allow(dead_code)]
+    pub swe_forge_fields: Option<SweForgeTaskFields>,
 }
 
 #[derive(Debug)]
@@ -252,6 +263,7 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
         prompt,
         test_scripts,
         test_source_files,
+        swe_forge_fields: None,
     })
 }
 
