@@ -6,6 +6,7 @@ mod executor;
 mod handlers;
 mod metrics;
 mod session;
+mod swe_forge;
 mod task;
 mod validator_whitelist;
 mod ws;
