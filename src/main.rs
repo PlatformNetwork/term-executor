@@ -2,6 +2,7 @@ mod auth;
 mod cleanup;
 mod config;
 mod consensus;
+mod evaluation;
 mod executor;
 mod handlers;
 mod metrics;
