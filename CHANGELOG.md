@@ -1,3 +1,10 @@
+# [2.2.0](https://github.com/PlatformNetwork/term-executor/compare/v2.1.0...v2.2.0) (2026-02-20)
+
+
+### Features
+
+* **evaluation:** add evaluation module using platform-challenge-sdk types ([#6](https://github.com/PlatformNetwork/term-executor/issues/6)) ([78a369e](https://github.com/PlatformNetwork/term-executor/commit/78a369e46cfde69b8b748acf1215ec567cf5ae2c))
+
 # [2.1.0](https://github.com/PlatformNetwork/term-executor/compare/v2.0.0...v2.1.0) (2026-02-20)
 
 
