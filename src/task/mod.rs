@@ -434,4 +434,74 @@ language: "python"
         let task = parse_task(dir).unwrap();
         assert_eq!(task.test_scripts.len(), 2);
     }
+
+    #[test]
+    fn test_parse_swe_forge_workspace() {
+        let yaml = r#"
+repo: "https://github.com/pallets/flask"
+version: "3.0.0"
+base_commit: "abc123"
+language: "python"
+fail_to_pass:
+  - "pytest tests/test_fix.py"
+  - "pytest tests/test_regression.py"
+pass_to_pass:
+  - "pytest tests/test_basic.py"
+install_config:
+  install: "pip install -e ."
+  python: "3.11"
+difficulty: "hard"
+difficulty_score: 3
+patch: "diff --git a/app.py b/app.py"
+prompt: "Fix the routing bug"
+"#;
+        let config: WorkspaceConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.repo, "https://github.com/pallets/flask");
+        assert_eq!(config.difficulty.as_deref(), Some("hard"));
+        assert_eq!(config.difficulty_score, Some(3));
+
+        let f2p = config.fail_to_pass.unwrap();
+        assert_eq!(f2p.len(), 2);
+        assert_eq!(f2p[0], "pytest tests/test_fix.py");
+
+        let p2p = config.pass_to_pass.unwrap();
+        assert_eq!(p2p.len(), 1);
+
+        let ic = config.install_config.unwrap();
+        assert_eq!(ic.get("install").unwrap(), "pip install -e .");
+        assert_eq!(ic.get("python").unwrap(), "3.11");
+
+        assert_eq!(config.patch.as_deref(), Some("diff --git a/app.py b/app.py"));
+        assert_eq!(config.prompt.as_deref(), Some("Fix the routing bug"));
+    }
+
+    #[test]
+    fn test_parse_task_swe_forge_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // workspace.yaml with fail_to_pass/pass_to_pass but NO checks.txt or tests/
+        std::fs::write(
+            dir.join("workspace.yaml"),
+            r#"
+repo: "https://github.com/test/repo"
+fail_to_pass:
+  - "pytest tests/test_fix.py"
+pass_to_pass:
+  - "pytest tests/test_basic.py"
+install_config:
+  install: "pip install -e ."
+"#,
+        )
+        .unwrap();
+        std::fs::write(dir.join("prompt.md"), "Fix the bug").unwrap();
+
+        let task = parse_task(dir).unwrap();
+        // Should generate test scripts from fail_to_pass + pass_to_pass
+        assert_eq!(task.test_scripts.len(), 2);
+        assert!(task.test_scripts[0].0.contains("fail_to_pass"));
+        assert!(task.test_scripts[1].0.contains("pass_to_pass"));
+        // install should be populated from install_config
+        assert!(task.workspace.install.is_some());
+        assert_eq!(task.workspace.install.unwrap()[0], "pip install -e .");
+    }
 }
