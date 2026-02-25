@@ -43,6 +43,8 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/batch/{id}/tasks", get(get_batch_tasks))
         .route("/batch/{id}/task/{task_id}", get(get_task))
         .route("/batches", get(list_batches))
+        .route("/verify/{batch_id}", get(verify_batch))
+        .route("/instance", get(instance_info))
         .route("/ws", get(ws::ws_handler))
         .with_state(state)
 }
@@ -399,4 +401,120 @@ async fn list_batches(State(state): State<Arc<AppState>>) -> Json<Vec<BatchListE
             })
             .collect(),
     )
+}
+
+/// Execution proof for a completed batch.
+/// Returns a SHA256 hash of the batch results that validators can verify.
+#[derive(Serialize)]
+struct ExecutionProof {
+    batch_id: String,
+    status: crate::session::BatchStatus,
+    total_tasks: usize,
+    passed_tasks: usize,
+    failed_tasks: usize,
+    aggregate_reward: f64,
+    /// SHA256 hash of: batch_id + task results (task_id, passed, reward) sorted
+    results_hash: String,
+    /// Per-task summary
+    task_summaries: Vec<TaskSummary>,
+    /// Executor version
+    executor_version: String,
+    /// Instance uptime in seconds
+    uptime_secs: i64,
+}
+
+#[derive(Serialize)]
+struct TaskSummary {
+    task_id: String,
+    passed: bool,
+    reward: f64,
+    duration_ms: Option<u64>,
+}
+
+async fn verify_batch(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(batch_id): axum::extract::Path<String>,
+) -> Result<Json<ExecutionProof>, StatusCode> {
+    let batch = state.sessions.get(&batch_id).ok_or(StatusCode::NOT_FOUND)?;
+    let result = batch.result.lock().await;
+
+    // Only return proof for completed batches
+    if result.status != crate::session::BatchStatus::Completed
+        && result.status != crate::session::BatchStatus::Failed
+    {
+        return Err(StatusCode::CONFLICT);
+    }
+
+    // Build deterministic hash of results
+    let mut hasher = Sha256::new();
+    hasher.update(result.batch_id.as_bytes());
+    let mut sorted_tasks: Vec<_> = result.tasks.iter().collect();
+    sorted_tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
+    for task in &sorted_tasks {
+        hasher.update(task.task_id.as_bytes());
+        hasher.update(if task.passed == Some(true) { b"1" } else { b"0" });
+        hasher.update(task.reward.to_bits().to_le_bytes());
+    }
+    let results_hash = hex::encode(hasher.finalize());
+
+    let task_summaries: Vec<TaskSummary> = sorted_tasks
+        .iter()
+        .map(|t| TaskSummary {
+            task_id: t.task_id.clone(),
+            passed: t.passed == Some(true),
+            reward: t.reward,
+            duration_ms: t.duration_ms,
+        })
+        .collect();
+
+    let uptime = (Utc::now() - state.started_at).num_seconds();
+
+    Ok(Json(ExecutionProof {
+        batch_id: result.batch_id.clone(),
+        status: result.status.clone(),
+        total_tasks: result.total_tasks,
+        passed_tasks: result.passed_tasks,
+        failed_tasks: result.failed_tasks,
+        aggregate_reward: result.aggregate_reward,
+        results_hash,
+        task_summaries,
+        executor_version: env!("CARGO_PKG_VERSION").to_string(),
+        uptime_secs: uptime,
+    }))
+}
+
+/// Instance metadata — returns info about this executor instance.
+/// Validators use this to verify the executor is running the expected image.
+#[derive(Serialize)]
+struct InstanceInfo {
+    /// Executor version from Cargo.toml
+    version: String,
+    /// Image name (from IMAGE_NAME env var, set in Dockerfile)
+    image: String,
+    /// Image digest (from IMAGE_DIGEST env var, set at build/deploy time)
+    image_digest: String,
+    /// Uptime in seconds
+    uptime_secs: i64,
+    /// Node hostname
+    hostname: String,
+    /// Max concurrent tasks
+    max_concurrent_tasks: usize,
+    /// Bittensor netuid
+    netuid: u16,
+}
+
+async fn instance_info(State(state): State<Arc<AppState>>) -> Json<InstanceInfo> {
+    let uptime = (Utc::now() - state.started_at).num_seconds();
+    Json(InstanceInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        image: std::env::var("IMAGE_NAME")
+            .unwrap_or_else(|_| "platformnetwork/term-executor".to_string()),
+        image_digest: std::env::var("IMAGE_DIGEST").unwrap_or_default(),
+        uptime_secs: uptime,
+        hostname: hostname::get()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_default(),
+        max_concurrent_tasks: state.config.max_concurrent_tasks,
+        netuid: state.config.bittensor_netuid,
+    })
 }

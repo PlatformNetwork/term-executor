@@ -19,6 +19,8 @@ COPY --from=builder /build/target/release/term-executor /usr/local/bin/
 RUN groupadd --system executor && useradd --system --gid executor --create-home executor \
     && mkdir -p /tmp/sessions && chown executor:executor /tmp/sessions
 USER executor
+ENV IMAGE_NAME=platformnetwork/term-executor
+ENV IMAGE_DIGEST=""
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1

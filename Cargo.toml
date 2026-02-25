@@ -53,6 +53,9 @@ zip = "2"
 # Temp files
 tempfile = "3"
 
+# System info
+hostname = "0.4"
+
 # Concurrency
 parking_lot = "0.12"
 dashmap = "6"
