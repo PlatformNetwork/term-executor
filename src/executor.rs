@@ -421,6 +421,8 @@ async fn run_task_pipeline(
     result.reward = if all_passed { 1.0 } else { 0.0 };
     result.test_results = test_results;
     result.test_output = test_output_combined;
+    result.agent_output = agent_output;
+    result.agent_patch = agent_patch;
 
     Ok(result)
 }

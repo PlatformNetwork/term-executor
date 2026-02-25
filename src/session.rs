@@ -44,6 +44,8 @@ pub struct TaskResult {
     pub reward: f64,
     pub test_results: Vec<TaskTestResult>,
     pub test_output: String,
+    pub agent_output: String,
+    pub agent_patch: String,
     pub error: Option<String>,
     pub duration_ms: Option<u64>,
 }
@@ -57,6 +59,8 @@ impl TaskResult {
             reward: 0.0,
             test_results: Vec::new(),
             test_output: String::new(),
+            agent_output: String::new(),
+            agent_patch: String::new(),
             error: None,
             duration_ms: None,
         }

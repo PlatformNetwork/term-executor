@@ -346,6 +346,8 @@ async fn get_batch_tasks(
                 "passed": t.passed,
                 "reward": t.reward,
                 "test_output": t.test_output,
+                "agent_output": t.agent_output,
+                "agent_patch": t.agent_patch,
                 "error": t.error,
                 "duration_ms": t.duration_ms,
             })
@@ -378,6 +380,8 @@ async fn get_task(
         "reward": task.reward,
         "test_results": task.test_results,
         "test_output": task.test_output,
+        "agent_output": task.agent_output,
+        "agent_patch": task.agent_patch,
         "error": task.error,
         "duration_ms": task.duration_ms,
     })))
