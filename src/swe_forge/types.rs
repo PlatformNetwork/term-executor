@@ -1,4 +1,12 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+fn deserialize_null_string<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let opt: Option<String> = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DatasetEntry {
@@ -6,6 +14,7 @@ pub struct DatasetEntry {
     pub instance_id: String,
     pub base_commit: String,
     pub patch: String,
+    #[serde(default, deserialize_with = "deserialize_null_string")]
     pub test_patch: String,
     pub problem_statement: String,
     #[serde(default)]
