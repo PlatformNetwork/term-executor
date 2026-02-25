@@ -14,12 +14,20 @@ pub struct DatasetEntry {
     pub created_at: Option<String>,
     #[serde(default)]
     pub version: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "FAIL_TO_PASS")]
     pub fail_to_pass: Option<String>,
-    #[serde(default)]
+    #[serde(default, alias = "PASS_TO_PASS")]
     pub pass_to_pass: Option<String>,
     #[serde(default)]
     pub environment_setup_commit: Option<String>,
+    #[serde(default)]
+    pub language: Option<String>,
+    #[serde(default)]
+    pub difficulty: Option<String>,
+    #[serde(default)]
+    pub difficulty_score: Option<u8>,
+    #[serde(default)]
+    pub quality_score: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,5 +142,31 @@ mod tests {
         let back: HuggingFaceDataset = serde_json::from_str(&json).expect("should deserialize");
         assert_eq!(back.dataset_id, "CortexLM/swe-forge");
         assert_eq!(back.total_count, 0);
+    }
+
+    #[test]
+    fn test_dataset_entry_huggingface_uppercase_keys() {
+        // HuggingFace API returns FAIL_TO_PASS and PASS_TO_PASS in uppercase
+        let json = r#"{
+            "repo": "django/django",
+            "instance_id": "django__django-12345",
+            "base_commit": "abc123",
+            "patch": "diff",
+            "test_patch": "",
+            "problem_statement": "Fix bug",
+            "FAIL_TO_PASS": "[\"pytest tests/test_fix.py\"]",
+            "PASS_TO_PASS": "[\"pytest tests/test_basic.py\"]",
+            "language": "python",
+            "difficulty": "hard",
+            "difficulty_score": 3,
+            "quality_score": 0.82
+        }"#;
+        let entry: DatasetEntry = serde_json::from_str(json).expect("should deserialize HF format");
+        assert_eq!(entry.fail_to_pass.as_deref(), Some("[\"pytest tests/test_fix.py\"]"));
+        assert_eq!(entry.pass_to_pass.as_deref(), Some("[\"pytest tests/test_basic.py\"]"));
+        assert_eq!(entry.language.as_deref(), Some("python"));
+        assert_eq!(entry.difficulty.as_deref(), Some("hard"));
+        assert_eq!(entry.difficulty_score, Some(3));
+        assert!((entry.quality_score.unwrap() - 0.82).abs() < 0.001);
     }
 }

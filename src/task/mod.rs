@@ -42,7 +42,7 @@ pub struct WorkspaceConfig {
     pub prompt: Option<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SweForgeTask {
     pub id: String,
     pub workspace: WorkspaceConfig,

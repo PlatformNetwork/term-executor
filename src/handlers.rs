@@ -46,6 +46,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/verify/{batch_id}", get(verify_batch))
         .route("/instance", get(instance_info))
         .route("/dataset", get(fetch_dataset))
+        .route("/submit_tasks", post(submit_tasks))
         .route("/ws", get(ws::ws_handler))
         .with_state(state)
 }
@@ -536,7 +537,7 @@ async fn fetch_dataset(
         )
     })?;
 
-    let split = query.split.unwrap_or_else(|| "test".to_string());
+    let split = query.split.unwrap_or_else(|| "train".to_string());
     let limit = query.limit.unwrap_or(10).min(100);
     let offset = query.offset.unwrap_or(0);
 
@@ -559,11 +560,8 @@ async fn fetch_dataset(
         dataset
             .entries
             .iter()
-            .filter(|_e| {
-                // swe-forge puts difficulty in separate splits (easy, medium, hard)
-                // so typically the split itself is the filter
-                let _ = diff;
-                true
+            .filter(|e| {
+                e.difficulty.as_deref().map(|d| d.eq_ignore_ascii_case(diff)).unwrap_or(false)
             })
             .collect()
     } else {
@@ -583,7 +581,10 @@ async fn fetch_dataset(
             "fail_to_pass": e.fail_to_pass,
             "pass_to_pass": e.pass_to_pass,
             "version": e.version,
-            "language": e.hints_text.as_deref().unwrap_or("python"),
+            "language": e.language,
+            "difficulty": e.difficulty,
+            "difficulty_score": e.difficulty_score,
+            "quality_score": e.quality_score,
         })).collect::<Vec<_>>(),
     })))
 }
@@ -594,4 +595,198 @@ struct DatasetQuery {
     limit: Option<usize>,
     offset: Option<usize>,
     difficulty: Option<String>,
+}
+
+/// Request body for /submit_tasks: validators provide task IDs to execute.
+/// The executor fetches matching tasks from HuggingFace CortexLM/swe-forge,
+/// pairs them with the uploaded agent archive, and runs them.
+#[derive(serde::Deserialize)]
+struct SubmitTasksRequest {
+    /// List of instance_ids from the swe-forge dataset to execute
+    task_ids: Vec<String>,
+    /// HuggingFace dataset split (default: "train")
+    #[serde(default = "default_train_split")]
+    split: String,
+}
+
+fn default_train_split() -> String {
+    "train".to_string()
+}
+
+/// Accept a list of task_ids from validators, fetch them from HuggingFace,
+/// and execute them with the agent code from the uploaded archive.
+async fn submit_tasks(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    mut multipart: Multipart,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Auth check
+    let auth_headers = auth::extract_auth_headers(&headers).ok_or_else(|| {
+        (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "missing_auth",
+                "message": "Missing required headers: X-Hotkey, X-Nonce, X-Signature"
+            })),
+        )
+    })?;
+
+    if state.validator_whitelist.validator_count() > 0 {
+        if let Err(e) = auth::verify_request(
+            &auth_headers,
+            &state.nonce_store,
+            &state.validator_whitelist,
+        ) {
+            return Err((
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({
+                    "error": e.code(),
+                    "message": e.message(),
+                })),
+            ));
+        }
+    }
+
+    // Parse multipart: expect "task_ids" (JSON) and "archive" (file)
+    let mut task_ids: Option<Vec<String>> = None;
+    let mut split = "train".to_string();
+    let mut archive_data: Option<Vec<u8>> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "task_ids" => {
+                let text = field.text().await.map_err(|e| {
+                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Failed to read task_ids: {}", e)})))
+                })?;
+                task_ids = Some(serde_json::from_str::<Vec<String>>(&text).map_err(|e| {
+                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Invalid task_ids JSON: {}", e)})))
+                })?);
+            }
+            "split" => {
+                split = field.text().await.unwrap_or_else(|_| "train".to_string());
+            }
+            "archive" | "file" => {
+                let mut buf = Vec::new();
+                use futures::TryStreamExt;
+                let mut stream = field;
+                while let Some(chunk) = stream.try_next().await.map_err(|e| {
+                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Upload failed: {}", e)})))
+                })? {
+                    buf.extend_from_slice(&chunk);
+                }
+                archive_data = Some(buf);
+            }
+            _ => {}
+        }
+    }
+
+    let task_ids = task_ids.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing task_ids field"})))
+    })?;
+
+    let archive_bytes = archive_data.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing archive file with agent code"})))
+    })?;
+
+    if task_ids.is_empty() || task_ids.len() > 50 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "task_ids must have 1-50 entries"})),
+        ));
+    }
+
+    // Fetch full dataset from HuggingFace to find matching tasks
+    let hf_client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("HF client error: {}", e)})))
+    })?;
+
+    let config = crate::swe_forge::types::DatasetConfig {
+        dataset_id: "CortexLM/swe-forge".to_string(),
+        split,
+        limit: 100, // fetch all (dataset has 66 rows currently)
+        offset: 0,
+    };
+
+    let dataset = hf_client.fetch_dataset(&config).await.map_err(|e| {
+        (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": format!("Failed to fetch HF dataset: {}", e)})))
+    })?;
+
+    // Match requested task_ids
+    let matched: Vec<&crate::swe_forge::types::DatasetEntry> = dataset
+        .entries
+        .iter()
+        .filter(|e| task_ids.contains(&e.instance_id))
+        .collect();
+
+    let not_found: Vec<&String> = task_ids
+        .iter()
+        .filter(|id| !matched.iter().any(|e| &e.instance_id == *id))
+        .collect();
+
+    if matched.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "No matching tasks found in dataset",
+                "requested": task_ids,
+                "available_count": dataset.entries.len(),
+            })),
+        ));
+    }
+
+    // Convert HF entries to SweForgeTask + build archive with tasks/ dirs
+    let mut registry = crate::task::registry::TaskRegistry::new();
+    let hf_dataset = crate::swe_forge::types::HuggingFaceDataset {
+        dataset_id: dataset.dataset_id.clone(),
+        split: dataset.split.clone(),
+        entries: matched.into_iter().cloned().collect(),
+        total_count: dataset.total_count,
+    };
+    registry.load_from_huggingface(&hf_dataset).map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to load tasks: {}", e)})))
+    })?;
+
+    // Extract agent code from uploaded archive
+    let extract_dir = state.config.workspace_base.join("_extract_submit_tasks");
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
+        .await
+        .map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Failed to extract agent archive: {}", e)})))
+        })?;
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+    // Replace the tasks from archive with the HF tasks, but keep the agent code
+    let hf_tasks: Vec<crate::task::SweForgeTask> = registry.get_tasks().to_vec();
+    let final_archive = crate::task::ExtractedArchive {
+        tasks: hf_tasks,
+        agent_code: extracted.agent_code,
+        agent_language: extracted.agent_language,
+    };
+
+    if state.sessions.has_active_batch() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "A batch is already running"})),
+        ));
+    }
+
+    let total_tasks = final_archive.tasks.len();
+    let batch = state.sessions.create_batch(total_tasks);
+    let batch_id = batch.id.clone();
+    let concurrent = state.config.max_concurrent_tasks;
+
+    state.executor.spawn_batch(batch, final_archive, concurrent);
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "batch_id": batch_id,
+            "total_tasks": total_tasks,
+            "matched_task_ids": task_ids.iter().filter(|id| !not_found.contains(id)).collect::<Vec<_>>(),
+            "not_found": not_found,
+            "ws_url": format!("/ws?batch_id={}", batch_id),
+        })),
+    ))
 }

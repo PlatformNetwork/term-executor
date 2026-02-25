@@ -353,6 +353,10 @@ mod tests {
             fail_to_pass: Some(r#"["tests/test_orm.py::test_query"]"#.to_string()),
             pass_to_pass: None,
             environment_setup_commit: None,
+            language: Some("python".to_string()),
+            difficulty: Some("medium".to_string()),
+            difficulty_score: Some(2),
+            quality_score: Some(0.75),
         }
     }
 }
