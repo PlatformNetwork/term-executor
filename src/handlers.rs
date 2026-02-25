@@ -45,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/batches", get(list_batches))
         .route("/verify/{batch_id}", get(verify_batch))
         .route("/instance", get(instance_info))
+        .route("/dataset", get(fetch_dataset))
         .route("/ws", get(ws::ws_handler))
         .with_state(state)
 }
@@ -517,4 +518,76 @@ async fn instance_info(State(state): State<Arc<AppState>>) -> Json<InstanceInfo>
         max_concurrent_tasks: state.config.max_concurrent_tasks,
         netuid: state.config.bittensor_netuid,
     })
+}
+
+/// Fetch SWE-bench tasks from HuggingFace CortexLM/swe-forge dataset.
+/// Query params: ?split=test&limit=10&offset=0&difficulty=hard
+async fn fetch_dataset(
+    axum::extract::Query(query): axum::extract::Query<DatasetQuery>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to create HF client: {}", e)})),
+        )
+    })?;
+
+    let split = query.split.unwrap_or_else(|| "test".to_string());
+    let limit = query.limit.unwrap_or(10).min(100);
+    let offset = query.offset.unwrap_or(0);
+
+    let config = crate::swe_forge::types::DatasetConfig {
+        dataset_id: "CortexLM/swe-forge".to_string(),
+        split: split.clone(),
+        limit,
+        offset,
+    };
+
+    let dataset = client.fetch_dataset(&config).await.map_err(|e| {
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("Failed to fetch dataset: {}", e)})),
+        )
+    })?;
+
+    // Filter by difficulty if specified
+    let entries: Vec<&crate::swe_forge::types::DatasetEntry> = if let Some(ref diff) = query.difficulty {
+        dataset
+            .entries
+            .iter()
+            .filter(|_e| {
+                // swe-forge puts difficulty in separate splits (easy, medium, hard)
+                // so typically the split itself is the filter
+                let _ = diff;
+                true
+            })
+            .collect()
+    } else {
+        dataset.entries.iter().collect()
+    };
+
+    Ok(Json(serde_json::json!({
+        "dataset_id": dataset.dataset_id,
+        "split": dataset.split,
+        "total_count": dataset.total_count,
+        "returned": entries.len(),
+        "entries": entries.iter().map(|e| serde_json::json!({
+            "instance_id": e.instance_id,
+            "repo": e.repo,
+            "base_commit": e.base_commit,
+            "problem_statement": &e.problem_statement[..e.problem_statement.len().min(500)],
+            "fail_to_pass": e.fail_to_pass,
+            "pass_to_pass": e.pass_to_pass,
+            "version": e.version,
+            "language": e.hints_text.as_deref().unwrap_or("python"),
+        })).collect::<Vec<_>>(),
+    })))
+}
+
+#[derive(serde::Deserialize)]
+struct DatasetQuery {
+    split: Option<String>,
+    limit: Option<usize>,
+    offset: Option<usize>,
+    difficulty: Option<String>,
 }

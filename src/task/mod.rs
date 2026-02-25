@@ -17,6 +17,7 @@ const MAX_ARCHIVE_SIZE: usize = 500 * 1024 * 1024;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspaceConfig {
     pub repo: String,
+    #[serde(default)]
     pub version: String,
     #[serde(default)]
     pub base_commit: Option<String>,
@@ -24,6 +25,21 @@ pub struct WorkspaceConfig {
     pub install: Option<Vec<String>>,
     #[serde(default)]
     pub language: Option<String>,
+    // SWE-bench / swe-forge fields
+    #[serde(default)]
+    pub fail_to_pass: Option<Vec<String>>,
+    #[serde(default)]
+    pub pass_to_pass: Option<Vec<String>>,
+    #[serde(default)]
+    pub install_config: Option<std::collections::BTreeMap<String, String>>,
+    #[serde(default)]
+    pub difficulty: Option<String>,
+    #[serde(default)]
+    pub difficulty_score: Option<u8>,
+    #[serde(default)]
+    pub patch: Option<String>,
+    #[serde(default)]
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug)]
@@ -219,7 +235,7 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
     let workspace_path = task_dir.join("workspace.yaml");
     let workspace_content =
         std::fs::read_to_string(&workspace_path).context("Missing workspace.yaml")?;
-    let workspace: WorkspaceConfig =
+    let mut workspace: WorkspaceConfig =
         serde_yaml::from_str(&workspace_content).context("Invalid workspace.yaml")?;
 
     let prompt_path = task_dir.join("prompt.md");
@@ -254,6 +270,36 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
             let name = format!("check_{}.sh", i);
             let content = format!("#!/bin/sh\nset -e\n{}\n", line);
             test_scripts.push((name, content));
+        }
+    }
+
+    // Fall back to fail_to_pass + pass_to_pass from workspace.yaml (swe-forge/SWE-bench format)
+    if test_scripts.is_empty() {
+        let mut idx = 0;
+        if let Some(ref f2p) = workspace.fail_to_pass {
+            for cmd in f2p {
+                let name = format!("fail_to_pass_{}.sh", idx);
+                let content = format!("#!/bin/sh\nset -e\n{}\n", cmd);
+                test_scripts.push((name, content));
+                idx += 1;
+            }
+        }
+        if let Some(ref p2p) = workspace.pass_to_pass {
+            for cmd in p2p {
+                let name = format!("pass_to_pass_{}.sh", idx);
+                let content = format!("#!/bin/sh\nset -e\n{}\n", cmd);
+                test_scripts.push((name, content));
+                idx += 1;
+            }
+        }
+    }
+
+    // Fall back to install_config["install"] if workspace.install is empty
+    if workspace.install.is_none() {
+        if let Some(ref ic) = workspace.install_config {
+            if let Some(install_cmd) = ic.get("install") {
+                workspace.install = Some(vec![install_cmd.clone()]);
+            }
         }
     }
 

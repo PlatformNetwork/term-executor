@@ -119,12 +119,28 @@ fn parse_test_list(raw: &str) -> Vec<String> {
 fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
     let repo_url = build_repo_url(&entry.repo);
 
+    let f2p: Option<Vec<String>> = entry
+        .fail_to_pass
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    let p2p: Option<Vec<String>> = entry
+        .pass_to_pass
+        .as_deref()
+        .and_then(|s| serde_json::from_str(s).ok());
+
     let workspace = WorkspaceConfig {
         repo: repo_url,
         version: entry.version.clone().unwrap_or_default(),
         base_commit: Some(entry.base_commit.clone()),
         install: None,
         language: Some("python".to_string()),
+        fail_to_pass: f2p,
+        pass_to_pass: p2p,
+        install_config: None,
+        difficulty: None,
+        difficulty_score: None,
+        patch: Some(entry.patch.clone()),
+        prompt: Some(entry.problem_statement.clone()),
     };
 
     let test_script = build_test_script(&entry.test_patch, entry.fail_to_pass.as_deref());

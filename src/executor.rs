@@ -363,7 +363,24 @@ async fn run_task_pipeline(
         config.agent_timeout_secs,
     )
     .await?;
-    let _ = agent_output;
+
+    // Capture git diff after agent runs (the patch the agent produced)
+    let agent_patch = match run_cmd(
+        &["git", "diff"],
+        &repo_dir,
+        Duration::from_secs(30),
+        None,
+    )
+    .await
+    {
+        Ok((stdout, _, _)) => stdout,
+        Err(_) => String::new(),
+    };
+    debug!("[{}] Agent patch: {} bytes", task.id, agent_patch.len());
+
+    // Store agent output and patch for later retrieval
+    let _ = tokio::fs::write(work_dir.join("agent_output.txt"), &agent_output).await;
+    let _ = tokio::fs::write(work_dir.join("agent_patch.diff"), &agent_patch).await;
 
     for (name, content) in &task.test_source_files {
         let dest = repo_dir.join(name);
