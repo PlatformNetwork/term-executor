@@ -365,17 +365,11 @@ async fn run_task_pipeline(
     .await?;
 
     // Capture git diff after agent runs (the patch the agent produced)
-    let agent_patch = match run_cmd(
-        &["git", "diff"],
-        &repo_dir,
-        Duration::from_secs(30),
-        None,
-    )
-    .await
-    {
-        Ok((stdout, _, _)) => stdout,
-        Err(_) => String::new(),
-    };
+    let agent_patch =
+        match run_cmd(&["git", "diff"], &repo_dir, Duration::from_secs(30), None).await {
+            Ok((stdout, _, _)) => stdout,
+            Err(_) => String::new(),
+        };
     debug!("[{}] Agent patch: {} bytes", task.id, agent_patch.len());
 
     // Store agent output and patch for later retrieval

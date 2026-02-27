@@ -471,7 +471,10 @@ prompt: "Fix the routing bug"
         assert_eq!(ic.get("install").unwrap(), "pip install -e .");
         assert_eq!(ic.get("python").unwrap(), "3.11");
 
-        assert_eq!(config.patch.as_deref(), Some("diff --git a/app.py b/app.py"));
+        assert_eq!(
+            config.patch.as_deref(),
+            Some("diff --git a/app.py b/app.py")
+        );
         assert_eq!(config.prompt.as_deref(), Some("Fix the routing bug"));
     }
 

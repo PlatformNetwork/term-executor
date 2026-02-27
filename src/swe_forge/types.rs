@@ -171,8 +171,14 @@ mod tests {
             "quality_score": 0.82
         }"#;
         let entry: DatasetEntry = serde_json::from_str(json).expect("should deserialize HF format");
-        assert_eq!(entry.fail_to_pass.as_deref(), Some("[\"pytest tests/test_fix.py\"]"));
-        assert_eq!(entry.pass_to_pass.as_deref(), Some("[\"pytest tests/test_basic.py\"]"));
+        assert_eq!(
+            entry.fail_to_pass.as_deref(),
+            Some("[\"pytest tests/test_fix.py\"]")
+        );
+        assert_eq!(
+            entry.pass_to_pass.as_deref(),
+            Some("[\"pytest tests/test_basic.py\"]")
+        );
         assert_eq!(entry.language.as_deref(), Some("python"));
         assert_eq!(entry.difficulty.as_deref(), Some("hard"));
         assert_eq!(entry.difficulty_score, Some(3));

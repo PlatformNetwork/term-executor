@@ -1,14 +1,16 @@
 use axum::{
     extract::{Multipart, State},
-    http::StatusCode,
-    response::{IntoResponse, Json, Response},
+    http::{header, StatusCode},
+    response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
     Router,
 };
 use chrono::Utc;
 use serde::Serialize;
+use std::collections::HashMap;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use tokio::sync::RwLock;
 use tracing::warn;
 
 use crate::auth::{self, NonceStore};
@@ -31,13 +33,18 @@ pub struct AppState {
     pub started_at: chrono::DateTime<Utc>,
     pub validator_whitelist: Arc<ValidatorWhitelist>,
     pub consensus_manager: Arc<ConsensusManager>,
+    pub agent_archive: Arc<RwLock<Option<Vec<u8>>>>,
+    pub agent_env: Arc<RwLock<HashMap<String, String>>>,
 }
 
 pub fn router(state: Arc<AppState>) -> Router {
     Router::new()
+        .route("/", get(upload_frontend))
         .route("/health", get(health))
         .route("/status", get(status))
         .route("/metrics", get(metrics))
+        .route("/upload-agent", post(upload_agent))
+        .route("/agent-code", get(get_agent_code))
         .route("/submit", post(submit_batch))
         .route("/batch/{id}", get(get_batch))
         .route("/batch/{id}/tasks", get(get_batch_tasks))
@@ -53,6 +60,265 @@ pub fn router(state: Arc<AppState>) -> Router {
 
 async fn health() -> impl IntoResponse {
     Json(serde_json::json!({ "status": "ok" }))
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+async fn upload_frontend(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let enabled = state.config.sudo_password.is_some();
+    let version = env!("CARGO_PKG_VERSION");
+
+    if !enabled {
+        return Html(format!(
+            r##"<!DOCTYPE html><html><head><meta charset="utf-8"><title>term-executor</title>
+<style>body{{background:#0a0a0a;color:#ff4444;font-family:monospace;display:flex;justify-content:center;padding:60px}}</style>
+</head><body><div>term-executor v{version} — Upload disabled (SUDO_PASSWORD not set)</div></body></html>"##
+        ));
+    }
+
+    Html(format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>term-executor</title>
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{background:#0a0a0a;color:#e0e0e0;font-family:monospace;display:flex;justify-content:center;padding:40px 20px}}
+.c{{max-width:720px;width:100%}}
+h1{{color:#b2ff22;margin-bottom:8px;font-size:1.4em}}
+.sub{{color:#666;margin-bottom:24px;font-size:0.85em}}
+label{{display:block;color:#888;margin:12px 0 4px;font-size:0.85em}}
+input[type=password],input[type=file]{{width:100%;padding:10px;background:#111;border:1px solid #333;color:#e0e0e0;border-radius:4px;font-family:monospace}}
+textarea{{width:100%;height:120px;padding:10px;background:#111;border:1px solid #333;color:#ffbd2e;border-radius:4px;font-family:monospace;font-size:12px;resize:vertical}}
+button{{margin-top:20px;padding:12px 32px;background:#b2ff22;color:#0a0a0a;border:none;border-radius:4px;font-weight:bold;cursor:pointer;font-family:monospace;font-size:1em;width:100%}}
+button:hover{{background:#9de01a}}
+button:disabled{{background:#333;color:#666;cursor:not-allowed}}
+.r{{margin-top:20px;padding:16px;border-radius:4px;display:none;font-size:0.9em;word-break:break-all}}
+.ok{{background:#0d1f00;border:1px solid #2a5a00;color:#b2ff22}}
+.err{{background:#1f0000;border:1px solid #5a0000;color:#ff4444}}
+.info{{color:#555;font-size:0.75em;margin-top:16px;line-height:1.6}}
+</style>
+</head>
+<body>
+<div class="c">
+<h1>term-executor</h1>
+<p class="sub">v{version} — Agent Upload</p>
+<form id="f" onsubmit="return up(event)">
+<label>Password</label>
+<input type="password" id="pw" required autocomplete="off">
+<label>Agent ZIP (project with requirements.txt + agent.py)</label>
+<input type="file" id="zip" accept=".zip" required>
+<label>Environment Variables (one per line: KEY=VALUE)</label>
+<textarea id="env" placeholder="CHUTES_API_KEY=cpk_...&#10;MODEL_NAME=deepseek-ai/DeepSeek-V3-0324-TEE"></textarea>
+<button type="submit" id="btn">Upload Agent</button>
+</form>
+<div id="res" class="r"></div>
+<div class="info">
+Upload a ZIP containing your agent project (agent.py, requirements.txt, etc).<br>
+Env vars are injected when running agent.py. Stored in-memory only. TLS by Basilica.
+</div>
+</div>
+<script>
+async function up(e){{
+  e.preventDefault();
+  const btn=document.getElementById('btn'),res=document.getElementById('res');
+  const file=document.getElementById('zip').files[0];
+  if(!file){{res.style.display='block';res.className='r err';res.textContent='No ZIP selected';return false}}
+  btn.disabled=true;btn.textContent='Uploading...';
+  const fd=new FormData();
+  fd.append('password',document.getElementById('pw').value);
+  fd.append('archive',file);
+  fd.append('env_vars',document.getElementById('env').value);
+  try{{
+    const r=await fetch('/upload-agent',{{method:'POST',body:fd}});
+    const d=await r.json();
+    res.style.display='block';
+    if(r.ok){{
+      res.className='r ok';
+      res.textContent='Uploaded — hash: '+d.archive_hash+' ('+d.size_bytes+' bytes, '+d.files_count+' files, '+d.env_count+' env vars)';
+    }}else{{
+      res.className='r err';
+      res.textContent='Error: '+(d.message||d.error||'unknown');
+    }}
+  }}catch(err){{
+    res.style.display='block';res.className='r err';res.textContent='Network error: '+err.message;
+  }}finally{{btn.disabled=false;btn.textContent='Upload Agent'}}
+  return false;
+}}
+</script>
+</body>
+</html>"##
+    ))
+}
+
+async fn upload_agent(
+    State(state): State<Arc<AppState>>,
+    mut multipart: Multipart,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let expected = state.config.sudo_password.as_deref().ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "upload_disabled", "message": "SUDO_PASSWORD not configured"})))
+    })?;
+
+    let mut password: Option<String> = None;
+    let mut archive_data: Option<Vec<u8>> = None;
+    let mut env_vars_raw: Option<String> = None;
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let name = field.name().unwrap_or("").to_string();
+        match name.as_str() {
+            "password" => {
+                password = field.text().await.ok();
+            }
+            "archive" | "file" => {
+                let bytes = field.bytes().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("Upload read failed: {}", e)})),
+                    )
+                })?;
+                archive_data = Some(bytes.to_vec());
+            }
+            "env_vars" => {
+                env_vars_raw = field.text().await.ok();
+            }
+            _ => {}
+        }
+    }
+
+    let pw = password.unwrap_or_default();
+    if !constant_time_eq(pw.as_bytes(), expected.as_bytes()) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_password", "message": "Invalid password"})),
+        ));
+    }
+
+    let archive_bytes = archive_data.ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": "missing_archive", "message": "No ZIP file uploaded"}),
+            ),
+        )
+    })?;
+
+    if archive_bytes.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "empty_archive", "message": "ZIP file is empty"})),
+        ));
+    }
+
+    const MAX_AGENT_SIZE: usize = 50 * 1024 * 1024; // 50MB
+    if archive_bytes.len() > MAX_AGENT_SIZE {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(
+                serde_json::json!({"error": "archive_too_large", "message": "ZIP exceeds 50MB limit"}),
+            ),
+        ));
+    }
+
+    // Validate it's a real ZIP
+    let files_count = {
+        let cursor = std::io::Cursor::new(&archive_bytes);
+        let archive = zip::ZipArchive::new(cursor).map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "invalid_zip", "message": format!("Not a valid ZIP: {}", e)})))
+        })?;
+        archive.len()
+    };
+
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&archive_bytes);
+        hex::encode(hasher.finalize())
+    };
+    let size = archive_bytes.len();
+
+    // Parse env vars: KEY=VALUE per line, skip empty/comments
+    let mut env_map = HashMap::new();
+    if let Some(raw) = &env_vars_raw {
+        for line in raw.lines() {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some(eq_pos) = trimmed.find('=') {
+                let key = trimmed[..eq_pos].trim().to_string();
+                let val = trimmed[eq_pos + 1..].trim().to_string();
+                if !key.is_empty() {
+                    env_map.insert(key, val);
+                }
+            }
+        }
+    }
+    let env_count = env_map.len();
+
+    *state.agent_archive.write().await = Some(archive_bytes);
+    *state.agent_env.write().await = env_map;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "archive_hash": hash,
+        "size_bytes": size,
+        "files_count": files_count,
+        "env_count": env_count,
+    })))
+}
+
+async fn get_agent_code(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+) -> Result<Response, (StatusCode, Json<serde_json::Value>)> {
+    let expected = state.config.sudo_password.as_deref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "disabled"})),
+        )
+    })?;
+
+    let password = headers
+        .get("x-password")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    if !constant_time_eq(password.as_bytes(), expected.as_bytes()) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_password"})),
+        ));
+    }
+
+    let archive = state.agent_archive.read().await;
+    match archive.as_deref() {
+        Some(bytes) => Ok((
+            StatusCode::OK,
+            [
+                (header::CONTENT_TYPE, "application/zip"),
+                (
+                    header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"agent.zip\"",
+                ),
+            ],
+            bytes.to_vec(),
+        )
+            .into_response()),
+        None => Err((
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::json!({"error": "no_agent", "message": "No agent archive uploaded yet"}),
+            ),
+        )),
+    }
 }
 
 #[derive(Serialize)]
@@ -458,7 +724,11 @@ async fn verify_batch(
     sorted_tasks.sort_by(|a, b| a.task_id.cmp(&b.task_id));
     for task in &sorted_tasks {
         hasher.update(task.task_id.as_bytes());
-        hasher.update(if task.passed == Some(true) { b"1" } else { b"0" });
+        hasher.update(if task.passed == Some(true) {
+            b"1"
+        } else {
+            b"0"
+        });
         hasher.update(task.reward.to_bits().to_le_bytes());
     }
     let results_hash = hex::encode(hasher.finalize());
@@ -556,17 +826,21 @@ async fn fetch_dataset(
     })?;
 
     // Filter by difficulty if specified
-    let entries: Vec<&crate::swe_forge::types::DatasetEntry> = if let Some(ref diff) = query.difficulty {
-        dataset
-            .entries
-            .iter()
-            .filter(|e| {
-                e.difficulty.as_deref().map(|d| d.eq_ignore_ascii_case(diff)).unwrap_or(false)
-            })
-            .collect()
-    } else {
-        dataset.entries.iter().collect()
-    };
+    let entries: Vec<&crate::swe_forge::types::DatasetEntry> =
+        if let Some(ref diff) = query.difficulty {
+            dataset
+                .entries
+                .iter()
+                .filter(|e| {
+                    e.difficulty
+                        .as_deref()
+                        .map(|d| d.eq_ignore_ascii_case(diff))
+                        .unwrap_or(false)
+                })
+                .collect()
+        } else {
+            dataset.entries.iter().collect()
+        };
 
     Ok(Json(serde_json::json!({
         "dataset_id": dataset.dataset_id,
@@ -600,15 +874,15 @@ struct DatasetQuery {
 /// Request body for /submit_tasks: validators provide task IDs to execute.
 /// The executor fetches matching tasks from HuggingFace CortexLM/swe-forge,
 /// pairs them with the uploaded agent archive, and runs them.
+#[allow(dead_code)]
 #[derive(serde::Deserialize)]
 struct SubmitTasksRequest {
-    /// List of instance_ids from the swe-forge dataset to execute
     task_ids: Vec<String>,
-    /// HuggingFace dataset split (default: "train")
     #[serde(default = "default_train_split")]
     split: String,
 }
 
+#[allow(dead_code)]
 fn default_train_split() -> String {
     "train".to_string()
 }
@@ -657,10 +931,18 @@ async fn submit_tasks(
         match name.as_str() {
             "task_ids" => {
                 let text = field.text().await.map_err(|e| {
-                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Failed to read task_ids: {}", e)})))
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(
+                            serde_json::json!({"error": format!("Failed to read task_ids: {}", e)}),
+                        ),
+                    )
                 })?;
                 task_ids = Some(serde_json::from_str::<Vec<String>>(&text).map_err(|e| {
-                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Invalid task_ids JSON: {}", e)})))
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("Invalid task_ids JSON: {}", e)})),
+                    )
                 })?);
             }
             "split" => {
@@ -671,7 +953,10 @@ async fn submit_tasks(
                 use futures::TryStreamExt;
                 let mut stream = field;
                 while let Some(chunk) = stream.try_next().await.map_err(|e| {
-                    (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Upload failed: {}", e)})))
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({"error": format!("Upload failed: {}", e)})),
+                    )
                 })? {
                     buf.extend_from_slice(&chunk);
                 }
@@ -682,11 +967,17 @@ async fn submit_tasks(
     }
 
     let task_ids = task_ids.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing task_ids field"})))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing task_ids field"})),
+        )
     })?;
 
     let archive_bytes = archive_data.ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Missing archive file with agent code"})))
+        (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "Missing archive file with agent code"})),
+        )
     })?;
 
     if task_ids.is_empty() || task_ids.len() > 50 {
@@ -698,7 +989,10 @@ async fn submit_tasks(
 
     // Fetch full dataset from HuggingFace to find matching tasks
     let hf_client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("HF client error: {}", e)})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("HF client error: {}", e)})),
+        )
     })?;
 
     let config = crate::swe_forge::types::DatasetConfig {
@@ -709,7 +1003,10 @@ async fn submit_tasks(
     };
 
     let dataset = hf_client.fetch_dataset(&config).await.map_err(|e| {
-        (StatusCode::BAD_GATEWAY, Json(serde_json::json!({"error": format!("Failed to fetch HF dataset: {}", e)})))
+        (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({"error": format!("Failed to fetch HF dataset: {}", e)})),
+        )
     })?;
 
     // Match requested task_ids
@@ -744,7 +1041,10 @@ async fn submit_tasks(
         total_count: dataset.total_count,
     };
     registry.load_from_huggingface(&hf_dataset).map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": format!("Failed to load tasks: {}", e)})))
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to load tasks: {}", e)})),
+        )
     })?;
 
     // Extract agent code from uploaded archive
@@ -753,7 +1053,12 @@ async fn submit_tasks(
     let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
         .await
         .map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("Failed to extract agent archive: {}", e)})))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(
+                    serde_json::json!({"error": format!("Failed to extract agent archive: {}", e)}),
+                ),
+            )
         })?;
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 

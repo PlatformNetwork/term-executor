@@ -31,6 +31,7 @@ pub struct Config {
     pub consensus_threshold: f64,
     pub consensus_ttl_secs: u64,
     pub max_pending_consensus: usize,
+    pub sudo_password: Option<String>,
 }
 
 impl Config {
@@ -71,6 +72,9 @@ impl Config {
                 "MAX_PENDING_CONSENSUS",
                 DEFAULT_MAX_PENDING_CONSENSUS,
             ),
+            sudo_password: std::env::var("SUDO_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty()),
         })
     }
 

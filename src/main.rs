@@ -62,6 +62,8 @@ async fn main() {
         started_at: chrono::Utc::now(),
         validator_whitelist: validator_whitelist.clone(),
         consensus_manager: consensus_manager.clone(),
+        agent_archive: Arc::new(tokio::sync::RwLock::new(None)),
+        agent_env: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
     });
 
     let app = handlers::router(state);
