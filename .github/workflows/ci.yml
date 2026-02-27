@@ -60,6 +60,7 @@ jobs:
 
       - name: Upload binary
         uses: actions/upload-artifact@v4
+        continue-on-error: true
         with:
           name: term-executor-linux-x86_64
           path: target/release/term-executor
