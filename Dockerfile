@@ -16,7 +16,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential nodejs npm \
     golang-go \
     && ln -sf /usr/bin/python3 /usr/bin/python \
-    && corepack enable 2>/dev/null || true \
+    && npm install -g corepack yarn pnpm \
+    && corepack enable \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
 RUN mkdir -p /tmp/sessions
