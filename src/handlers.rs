@@ -1229,24 +1229,25 @@ async fn evaluate_with_stored_agent(
         )
     })?;
 
-    // Extract agent code
+    // Extract agent code only (no tasks/ required - we use HF tasks)
     let extract_dir = state.config.workspace_base.join("_extract_evaluate");
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
-    let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_REQUEST,
-                Json(serde_json::json!({"error": format!("Failed to extract agent: {}", e)})),
-            )
-        })?;
+    let (agent_code, agent_language) =
+        crate::task::extract_agent_only(&archive_bytes, &extract_dir)
+            .await
+            .map_err(|e| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": format!("Failed to extract agent: {}", e)})),
+                )
+            })?;
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
     let hf_tasks: Vec<crate::task::SweForgeTask> = registry.get_tasks().to_vec();
     let final_archive = crate::task::ExtractedArchive {
         tasks: hf_tasks,
-        agent_code: extracted.agent_code,
-        agent_language: extracted.agent_language,
+        agent_code,
+        agent_language,
     };
 
     if state.sessions.has_active_batch() {

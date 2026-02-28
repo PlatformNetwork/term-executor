@@ -79,6 +79,31 @@ pub fn extract_archive_bytes(data: &[u8], dest: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Extract only the agent code from an archive (no tasks/ required).
+pub async fn extract_agent_only(data: &[u8], dest: &Path) -> Result<(String, String)> {
+    if data.len() > MAX_ARCHIVE_SIZE {
+        anyhow::bail!(
+            "Archive too large: {} bytes (max {})",
+            data.len(),
+            MAX_ARCHIVE_SIZE
+        );
+    }
+
+    tokio::fs::create_dir_all(dest)
+        .await
+        .context("Failed to create extraction directory")?;
+    let dest_owned = dest.to_path_buf();
+    let data_vec = data.to_vec();
+    tokio::task::spawn_blocking(move || extract_archive_bytes(&data_vec, &dest_owned))
+        .await
+        .context("Extract task panicked")??;
+
+    let root = find_agent_root(dest)?;
+    let agent_code = load_agent_code(&root)?;
+    let agent_language = detect_agent_language(&root);
+    Ok((agent_code, agent_language))
+}
+
 pub async fn extract_uploaded_archive(data: &[u8], dest: &Path) -> Result<ExtractedArchive> {
     if data.len() > MAX_ARCHIVE_SIZE {
         anyhow::bail!(
@@ -117,6 +142,20 @@ pub async fn extract_uploaded_archive(data: &[u8], dest: &Path) -> Result<Extrac
         agent_code,
         agent_language,
     })
+}
+
+fn find_agent_root(base: &Path) -> Result<PathBuf> {
+    if base.join("agent_code").exists() {
+        return Ok(base.to_path_buf());
+    }
+    for entry in std::fs::read_dir(base).context("Failed to read extracted directory")? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() && path.join("agent_code").exists() {
+            return Ok(path);
+        }
+    }
+    anyhow::bail!("No agent_code/ found in archive at {}", base.display())
 }
 
 fn find_archive_root(base: &Path) -> Result<PathBuf> {
