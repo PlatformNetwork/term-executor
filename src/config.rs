@@ -127,9 +127,13 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> T {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn test_config_defaults() {
+        let _lock = ENV_LOCK.lock().unwrap();
         let cfg = Config::from_env().expect("default config should be valid");
         assert_eq!(cfg.port, DEFAULT_PORT);
         assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
@@ -144,6 +148,7 @@ mod tests {
 
     #[test]
     fn test_config_rejects_zero_threshold() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("CONSENSUS_THRESHOLD", "0.0");
         let result = Config::from_env();
         std::env::remove_var("CONSENSUS_THRESHOLD");
@@ -155,6 +160,7 @@ mod tests {
 
     #[test]
     fn test_config_rejects_threshold_above_one() {
+        let _lock = ENV_LOCK.lock().unwrap();
         std::env::set_var("CONSENSUS_THRESHOLD", "1.5");
         let result = Config::from_env();
         std::env::remove_var("CONSENSUS_THRESHOLD");
