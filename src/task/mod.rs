@@ -277,6 +277,14 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
     let mut workspace: WorkspaceConfig =
         serde_yaml::from_str(&workspace_content).context("Invalid workspace.yaml")?;
 
+    // Normalize repo URL (e.g. "owner/repo" -> "https://github.com/owner/repo")
+    if !workspace.repo.starts_with("http://")
+        && !workspace.repo.starts_with("https://")
+        && !workspace.repo.starts_with("git@")
+    {
+        workspace.repo = format!("https://github.com/{}", workspace.repo);
+    }
+
     let prompt_path = task_dir.join("prompt.md");
     let prompt = std::fs::read_to_string(&prompt_path).context("Missing prompt.md")?;
 
