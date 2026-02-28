@@ -331,22 +331,9 @@ async fn run_task_pipeline(
     result.status = TaskStatus::InstallingDeps;
     if let Some(ref install_cmds) = task.workspace.install {
         for cmd in install_cmds {
-            // Prefix commands that need root (apt-get, dpkg, etc.) with sudo
-            let effective_cmd = if cmd.trim_start().starts_with("apt-get")
-                || cmd.trim_start().starts_with("dpkg")
-                || cmd.trim_start().starts_with("apt ")
-            {
-                format!("sudo {}", cmd)
-            } else if cmd.contains("apt-get") || cmd.contains("dpkg") {
-                // Command chain containing apt-get (e.g. "apt-get update && apt-get install ...")
-                cmd.replace("apt-get", "sudo apt-get")
-                    .replace("dpkg", "sudo dpkg")
-            } else {
-                cmd.clone()
-            };
-            info!("[{}] Installing: {}", task.id, effective_cmd);
+            info!("[{}] Installing: {}", task.id, cmd);
             let (_, stderr, exit) = run_shell(
-                &effective_cmd,
+                cmd,
                 &repo_dir,
                 Duration::from_secs(config.clone_timeout_secs),
                 None,
