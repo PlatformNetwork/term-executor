@@ -11,13 +11,16 @@ RUN cargo build --release && strip target/release/term-executor
 # ── Runtime stage ──
 FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl libssl3 \
+    ca-certificates git curl libssl3 sudo \
     python3 python3-pip python3-venv \
     build-essential nodejs npm \
+    golang-go \
     && ln -sf /usr/bin/python3 /usr/bin/python \
+    && corepack enable 2>/dev/null || true \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
 RUN groupadd --system executor && useradd --system --gid executor --create-home executor \
+    && echo "executor ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/executor \
     && mkdir -p /tmp/sessions && chown executor:executor /tmp/sessions
 USER executor
 ENV IMAGE_NAME=platformnetwork/term-executor
