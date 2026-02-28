@@ -1,9 +1,11 @@
 use anyhow::{Context, Result};
-use tracing::{debug, info};
+use std::path::Path;
+use tracing::{debug, info, warn};
 
 use super::types::{DatasetConfig, DatasetEntry, HfRowsResponse, HuggingFaceDataset};
 
 const HF_DATASET_VIEWER_BASE: &str = "https://datasets-server.huggingface.co/rows";
+const HF_REPO_BASE: &str = "https://huggingface.co";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_PAGE_SIZE: usize = 100;
 
@@ -95,6 +97,121 @@ impl HuggingFaceClient {
                 "No entry found at index {} in dataset {}",
                 index, dataset_id
             ))
+    }
+
+    /// Download all task files for a given instance_id from the HF repo into a local directory.
+    /// The directory will have workspace.yaml, prompt.md, tests/*.sh, etc.
+    pub async fn download_task_files(
+        &self,
+        dataset_id: &str,
+        instance_id: &str,
+        dest_dir: &Path,
+    ) -> Result<()> {
+        let tree_url = format!(
+            "{}/api/datasets/{}/tree/main/tasks/{}",
+            HF_REPO_BASE, dataset_id, instance_id
+        );
+        info!("Listing HF task files: {}", tree_url);
+
+        // List all files (including subdirectories)
+        let files = self.list_tree_recursive(dataset_id, instance_id).await?;
+
+        if files.is_empty() {
+            anyhow::bail!(
+                "No files found for task {} in dataset {}",
+                instance_id,
+                dataset_id
+            );
+        }
+
+        tokio::fs::create_dir_all(dest_dir).await?;
+
+        for file_path in &files {
+            let relative = file_path
+                .strip_prefix(&format!("tasks/{}/", instance_id))
+                .unwrap_or(file_path);
+            let local_path = dest_dir.join(relative);
+
+            if let Some(parent) = local_path.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+
+            let download_url = format!(
+                "{}/datasets/{}/resolve/main/{}",
+                HF_REPO_BASE, dataset_id, file_path
+            );
+            debug!("Downloading {} -> {}", download_url, local_path.display());
+
+            let resp = self
+                .client
+                .get(&download_url)
+                .send()
+                .await
+                .with_context(|| format!("Failed to download {}", download_url))?;
+
+            if !resp.status().is_success() {
+                warn!("Failed to download {}: HTTP {}", file_path, resp.status());
+                continue;
+            }
+
+            let bytes = resp.bytes().await?;
+            tokio::fs::write(&local_path, &bytes).await?;
+        }
+
+        info!(
+            "Downloaded {} files for task {} to {}",
+            files.len(),
+            instance_id,
+            dest_dir.display()
+        );
+        Ok(())
+    }
+
+    async fn list_tree_recursive(
+        &self,
+        dataset_id: &str,
+        instance_id: &str,
+    ) -> Result<Vec<String>> {
+        let mut all_files = Vec::new();
+        let mut dirs_to_visit = vec![format!("tasks/{}", instance_id)];
+
+        while let Some(dir_path) = dirs_to_visit.pop() {
+            let url = format!(
+                "{}/api/datasets/{}/tree/main/{}",
+                HF_REPO_BASE, dataset_id, dir_path
+            );
+            let resp = self
+                .client
+                .get(&url)
+                .send()
+                .await
+                .with_context(|| format!("Failed to list {}", url))?;
+
+            if !resp.status().is_success() {
+                warn!(
+                    "Failed to list directory {}: HTTP {}",
+                    dir_path,
+                    resp.status()
+                );
+                continue;
+            }
+
+            let entries: Vec<serde_json::Value> = resp.json().await?;
+            for entry in entries {
+                let entry_type = entry["type"].as_str().unwrap_or("");
+                let entry_path = entry["path"].as_str().unwrap_or("");
+                if entry_path.is_empty() {
+                    continue;
+                }
+                match entry_type {
+                    "file" => all_files.push(entry_path.to_string()),
+                    "directory" => dirs_to_visit.push(entry_path.to_string()),
+                    _ => {}
+                }
+            }
+        }
+
+        Ok(all_files)
     }
 
     async fn fetch_page(

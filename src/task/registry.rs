@@ -131,27 +131,6 @@ fn parse_test_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn auto_install_commands(language: &str) -> Option<Vec<String>> {
-    match language {
-        "python" => Some(vec![
-            "pip install -e '.[dev,test]' 2>/dev/null || pip install -e . 2>/dev/null || true".to_string(),
-            "pip install pytest 2>/dev/null || true".to_string(),
-        ]),
-        "javascript" | "typescript" => Some(vec![
-            "npm install --legacy-peer-deps 2>/dev/null || yarn install --frozen-lockfile 2>/dev/null || true".to_string(),
-        ]),
-        "go" => Some(vec![
-            "go mod download 2>/dev/null || true".to_string(),
-        ]),
-        "rust" => Some(vec![
-            "cargo fetch 2>/dev/null || true".to_string(),
-        ]),
-        _ => Some(vec![
-            "pip install -e . 2>/dev/null || npm install 2>/dev/null || true".to_string(),
-        ]),
-    }
-}
-
 fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
     let repo_url = build_repo_url(&entry.repo);
     let language = entry
@@ -168,13 +147,11 @@ fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
-    let install = auto_install_commands(&language);
-
     let workspace = WorkspaceConfig {
         repo: repo_url,
         version: entry.version.clone().unwrap_or_default(),
         base_commit: Some(entry.base_commit.clone()),
-        install,
+        install: None,
         language: Some(language),
         fail_to_pass: f2p,
         pass_to_pass: p2p,

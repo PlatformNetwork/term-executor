@@ -1150,7 +1150,7 @@ async fn evaluate_with_stored_agent(
         .get("task_ids")
         .and_then(|v| serde_json::from_value(v.clone()).ok())
         .unwrap_or_default();
-    let split = body
+    let _split = body
         .get("split")
         .and_then(|v| v.as_str())
         .unwrap_or("train")
@@ -1174,7 +1174,7 @@ async fn evaluate_with_stored_agent(
         })?
     };
 
-    // Fetch dataset from HuggingFace
+    // Download task files from HF repo (workspace.yaml, tests/*.sh, etc.)
     let hf_client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1182,52 +1182,45 @@ async fn evaluate_with_stored_agent(
         )
     })?;
 
-    let dataset_config = crate::swe_forge::types::DatasetConfig {
-        dataset_id: "CortexLM/swe-forge".to_string(),
-        split,
-        limit: 100,
-        offset: 0,
-    };
+    let dataset_id = "CortexLM/swe-forge";
+    let tasks_base = state.config.workspace_base.join("_hf_tasks");
+    let _ = tokio::fs::remove_dir_all(&tasks_base).await;
 
-    let dataset = hf_client
-        .fetch_dataset(&dataset_config)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({"error": format!("Failed to fetch HF dataset: {}", e)})),
-            )
-        })?;
+    let mut hf_tasks: Vec<crate::task::SweForgeTask> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
 
-    let matched: Vec<&crate::swe_forge::types::DatasetEntry> = dataset
-        .entries
-        .iter()
-        .filter(|e| task_ids.contains(&e.instance_id))
-        .collect();
-
-    if matched.is_empty() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(
-                serde_json::json!({"error": "No matching tasks found", "available": dataset.entries.len()}),
-            ),
-        ));
+    for task_id in &task_ids {
+        let task_dir = tasks_base.join(task_id.replace('/', "__"));
+        match hf_client
+            .download_task_files(dataset_id, task_id, &task_dir)
+            .await
+        {
+            Ok(()) => match crate::task::parse_task(&task_dir) {
+                Ok(mut task) => {
+                    task.id = task_id.clone();
+                    hf_tasks.push(task);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to parse task {}: {}", task_id, e);
+                    errors.push(format!("{}: parse error: {}", task_id, e));
+                }
+            },
+            Err(e) => {
+                tracing::warn!("Failed to download task {}: {}", task_id, e);
+                errors.push(format!("{}: download error: {}", task_id, e));
+            }
+        }
     }
 
-    // Build tasks from HF
-    let mut registry = crate::task::registry::TaskRegistry::new();
-    let hf_dataset = crate::swe_forge::types::HuggingFaceDataset {
-        dataset_id: dataset.dataset_id.clone(),
-        split: dataset.split.clone(),
-        entries: matched.into_iter().cloned().collect(),
-        total_count: dataset.total_count,
-    };
-    registry.load_from_huggingface(&hf_dataset).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": format!("Failed to load tasks: {}", e)})),
-        )
-    })?;
+    if hf_tasks.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "No valid tasks found",
+                "details": errors,
+            })),
+        ));
+    }
 
     // Extract agent code only (no tasks/ required - we use HF tasks)
     let extract_dir = state.config.workspace_base.join("_extract_evaluate");
@@ -1243,7 +1236,6 @@ async fn evaluate_with_stored_agent(
             })?;
     let _ = tokio::fs::remove_dir_all(&extract_dir).await;
 
-    let hf_tasks: Vec<crate::task::SweForgeTask> = registry.get_tasks().to_vec();
     let final_archive = crate::task::ExtractedArchive {
         tasks: hf_tasks,
         agent_code,
