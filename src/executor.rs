@@ -73,6 +73,24 @@ async fn run_shell(
     run_cmd(&["sh", "-c", shell_cmd], cwd, timeout, env).await
 }
 
+/// Filter out system-level package commands that can't run in restricted containers.
+/// Keeps project-level install commands (npm install, pip install, yarn install, etc.)
+fn filter_install_command(cmd: &str) -> String {
+    let system_prefixes = [
+        "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ", "snap ", "flatpak ",
+    ];
+
+    // Split on && and filter out system commands
+    let parts: Vec<&str> = cmd.split("&&").collect();
+    let filtered: Vec<&str> = parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !system_prefixes.iter().any(|prefix| p.starts_with(prefix)))
+        .collect();
+
+    filtered.join(" && ")
+}
+
 pub struct Executor {
     config: Arc<Config>,
     sessions: Arc<SessionManager>,
@@ -331,9 +349,20 @@ async fn run_task_pipeline(
     result.status = TaskStatus::InstallingDeps;
     if let Some(ref install_cmds) = task.workspace.install {
         for cmd in install_cmds {
-            info!("[{}] Installing: {}", task.id, cmd);
+            // Split chained commands and filter out system package commands
+            // that can't run in a restricted container (apt-get, dpkg, etc.)
+            let effective_cmd = filter_install_command(cmd);
+            if effective_cmd.is_empty() {
+                info!(
+                    "[{}] Skipping system install: {}",
+                    task.id,
+                    &cmd[..cmd.len().min(100)]
+                );
+                continue;
+            }
+            info!("[{}] Installing: {}", task.id, effective_cmd);
             let (_, stderr, exit) = run_shell(
-                cmd,
+                &effective_cmd,
                 &repo_dir,
                 Duration::from_secs(config.clone_timeout_secs),
                 None,
