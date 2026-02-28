@@ -54,6 +54,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/instance", get(instance_info))
         .route("/dataset", get(fetch_dataset))
         .route("/submit_tasks", post(submit_tasks))
+        .route("/evaluate", post(evaluate_with_stored_agent))
         .route("/ws", get(ws::ws_handler))
         .with_state(state)
 }
@@ -1092,6 +1093,182 @@ async fn submit_tasks(
             "matched_task_ids": task_ids.iter().filter(|id| !not_found.contains(id)).collect::<Vec<_>>(),
             "not_found": not_found,
             "ws_url": format!("/ws?batch_id={}", batch_id),
+        })),
+    ))
+}
+
+/// Evaluate using the stored agent archive (from /upload-agent).
+/// Accepts JSON body: { "task_ids": [...], "split": "train" }
+/// Auth: validator hotkey OR sudo password.
+async fn evaluate_with_stored_agent(
+    State(state): State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    Json(body): Json<serde_json::Value>,
+) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
+    // Auth: try validator hotkey first, then sudo password
+    let mut authed = false;
+
+    if let Some(auth_headers) = auth::extract_auth_headers(&headers) {
+        authed = state
+            .config
+            .trusted_validators
+            .contains(&auth_headers.hotkey)
+            || (state.validator_whitelist.validator_count() > 0
+                && auth::verify_request(
+                    &auth_headers,
+                    &state.nonce_store,
+                    &state.validator_whitelist,
+                )
+                .is_ok());
+    }
+
+    if !authed {
+        if let Some(password) = headers
+            .get("X-Password")
+            .or_else(|| headers.get("x-password"))
+            .and_then(|v| v.to_str().ok())
+        {
+            if let Some(ref sudo_pw) = state.config.sudo_password {
+                if constant_time_eq(password.as_bytes(), sudo_pw.as_bytes()) {
+                    authed = true;
+                }
+            }
+        }
+    }
+
+    if !authed {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(
+                serde_json::json!({"error": "unauthorized", "message": "Valid validator hotkey or sudo password required"}),
+            ),
+        ));
+    }
+
+    // Parse task_ids
+    let task_ids: Vec<String> = body
+        .get("task_ids")
+        .and_then(|v| serde_json::from_value(v.clone()).ok())
+        .unwrap_or_default();
+    let split = body
+        .get("split")
+        .and_then(|v| v.as_str())
+        .unwrap_or("train")
+        .to_string();
+
+    if task_ids.is_empty() || task_ids.len() > 50 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "task_ids must have 1-50 entries"})),
+        ));
+    }
+
+    // Get stored agent archive
+    let archive_bytes = {
+        let guard = state.agent_archive.read().await;
+        guard.clone().ok_or_else(|| {
+            (
+                StatusCode::PRECONDITION_FAILED,
+                Json(serde_json::json!({"error": "no_agent", "message": "No agent uploaded yet. Use /upload-agent first."})),
+            )
+        })?
+    };
+
+    // Fetch dataset from HuggingFace
+    let hf_client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("HF client error: {}", e)})),
+        )
+    })?;
+
+    let dataset_config = crate::swe_forge::types::DatasetConfig {
+        dataset_id: "CortexLM/swe-forge".to_string(),
+        split,
+        limit: 100,
+        offset: 0,
+    };
+
+    let dataset = hf_client
+        .fetch_dataset(&dataset_config)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("Failed to fetch HF dataset: {}", e)})),
+            )
+        })?;
+
+    let matched: Vec<&crate::swe_forge::types::DatasetEntry> = dataset
+        .entries
+        .iter()
+        .filter(|e| task_ids.contains(&e.instance_id))
+        .collect();
+
+    if matched.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(
+                serde_json::json!({"error": "No matching tasks found", "available": dataset.entries.len()}),
+            ),
+        ));
+    }
+
+    // Build tasks from HF
+    let mut registry = crate::task::registry::TaskRegistry::new();
+    let hf_dataset = crate::swe_forge::types::HuggingFaceDataset {
+        dataset_id: dataset.dataset_id.clone(),
+        split: dataset.split.clone(),
+        entries: matched.into_iter().cloned().collect(),
+        total_count: dataset.total_count,
+    };
+    registry.load_from_huggingface(&hf_dataset).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Failed to load tasks: {}", e)})),
+        )
+    })?;
+
+    // Extract agent code
+    let extract_dir = state.config.workspace_base.join("_extract_evaluate");
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+    let extracted = crate::task::extract_uploaded_archive(&archive_bytes, &extract_dir)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("Failed to extract agent: {}", e)})),
+            )
+        })?;
+    let _ = tokio::fs::remove_dir_all(&extract_dir).await;
+
+    let hf_tasks: Vec<crate::task::SweForgeTask> = registry.get_tasks().to_vec();
+    let final_archive = crate::task::ExtractedArchive {
+        tasks: hf_tasks,
+        agent_code: extracted.agent_code,
+        agent_language: extracted.agent_language,
+    };
+
+    if state.sessions.has_active_batch() {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"error": "A batch is already running. Try again later."})),
+        ));
+    }
+
+    let total_tasks = final_archive.tasks.len();
+    let batch = state.sessions.create_batch(total_tasks);
+    let batch_id = batch.id.clone();
+    let concurrent = state.config.max_concurrent_tasks;
+
+    state.executor.spawn_batch(batch, final_archive, concurrent);
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(serde_json::json!({
+            "batch_id": batch_id,
+            "total_tasks": total_tasks,
+            "matched_task_ids": task_ids,
         })),
     ))
 }

@@ -32,6 +32,7 @@ pub struct Config {
     pub consensus_ttl_secs: u64,
     pub max_pending_consensus: usize,
     pub sudo_password: Option<String>,
+    pub trusted_validators: Vec<String>,
 }
 
 impl Config {
@@ -75,6 +76,12 @@ impl Config {
             sudo_password: std::env::var("SUDO_PASSWORD")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            trusted_validators: std::env::var("TRUSTED_VALIDATORS")
+                .unwrap_or_default()
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
         })
     }
 

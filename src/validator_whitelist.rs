@@ -19,6 +19,13 @@ impl ValidatorWhitelist {
         })
     }
 
+    pub fn add_trusted(&self, hotkeys: &[String]) {
+        let mut set = self.hotkeys.write();
+        for hk in hotkeys {
+            set.insert(hk.clone());
+        }
+    }
+
     pub fn is_whitelisted(&self, ss58_hotkey: &str) -> bool {
         self.hotkeys.read().contains(ss58_hotkey)
     }

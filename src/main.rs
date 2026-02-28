@@ -51,6 +51,13 @@ async fn main() {
     ));
 
     let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
+    if !config.trusted_validators.is_empty() {
+        info!(
+            "Adding {} trusted validators (bypass consensus)",
+            config.trusted_validators.len()
+        );
+        validator_whitelist.add_trusted(&config.trusted_validators);
+    }
     let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
 
     let state = Arc::new(handlers::AppState {
