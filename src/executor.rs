@@ -15,6 +15,10 @@ use crate::task::{ExtractedArchive, SweForgeTask};
 
 const MAX_OUTPUT: usize = 1024 * 1024;
 
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 fn truncate_output(raw: &[u8]) -> String {
     if raw.len() <= MAX_OUTPUT {
         String::from_utf8_lossy(raw).to_string()
@@ -64,6 +68,7 @@ async fn run_cmd(
     ))
 }
 
+#[allow(dead_code)]
 async fn run_shell(
     shell_cmd: &str,
     cwd: &Path,
@@ -73,22 +78,59 @@ async fn run_shell(
     run_cmd(&["sh", "-c", shell_cmd], cwd, timeout, env).await
 }
 
-/// Filter out system-level package commands that can't run in restricted containers.
-/// Keeps project-level install commands (npm install, pip install, yarn install, etc.)
-fn filter_install_command(cmd: &str) -> String {
-    let system_prefixes = [
-        "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ", "snap ", "flatpak ",
-    ];
+/// Get the agent user name from AGENT_USER env var (default: "agent").
+fn agent_user() -> String {
+    std::env::var("AGENT_USER").unwrap_or_else(|_| "agent".to_string())
+}
 
-    // Split on && and filter out system commands
+/// Wrap a shell command to run as the agent user via sudo.
+fn as_agent_cmd(shell_cmd: &str, cwd: &Path) -> Vec<String> {
+    let user = agent_user();
+    vec![
+        "sudo".to_string(),
+        "-u".to_string(),
+        user,
+        "--preserve-env=PATH,HOME,JAVA_HOME,GOPATH,CARGO_HOME,NODE_PATH".to_string(),
+        "sh".to_string(),
+        "-c".to_string(),
+        format!("cd {} && {}", cwd.display(), shell_cmd),
+    ]
+}
+
+/// Run a shell command as the agent user.
+async fn run_shell_as_agent(
+    shell_cmd: &str,
+    cwd: &Path,
+    timeout: Duration,
+    env: Option<&[(&str, &str)]>,
+) -> Result<(String, String, i32)> {
+    let argv_owned = as_agent_cmd(shell_cmd, cwd);
+    let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
+    run_cmd(&argv, cwd, timeout, env).await
+}
+
+/// Prepare install command: add -y flag to apt-get commands, add DEBIAN_FRONTEND=noninteractive.
+fn prepare_install_command(cmd: &str) -> String {
     let parts: Vec<&str> = cmd.split("&&").collect();
-    let filtered: Vec<&str> = parts
+    let prepared: Vec<String> = parts
         .iter()
-        .map(|p| p.trim())
-        .filter(|p| !system_prefixes.iter().any(|prefix| p.starts_with(prefix)))
+        .map(|p| {
+            let trimmed = p.trim();
+            if trimmed.starts_with("apt-get") || trimmed.starts_with("apt ") {
+                if trimmed.contains("install") && !trimmed.contains("-y") {
+                    format!(
+                        "DEBIAN_FRONTEND=noninteractive sudo {}",
+                        trimmed.replace("install", "install -y")
+                    )
+                } else {
+                    format!("DEBIAN_FRONTEND=noninteractive sudo {}", trimmed)
+                }
+            } else {
+                trimmed.to_string()
+            }
+        })
         .collect();
-
-    filtered.join(" && ")
+    prepared.join(" && ")
 }
 
 pub struct Executor {
@@ -347,21 +389,24 @@ async fn run_task_pipeline(
     }
 
     result.status = TaskStatus::InstallingDeps;
+    // Ensure repo_dir is writable by the agent user
+    let _ = run_cmd(
+        &["chmod", "-R", "a+rwX", &repo_dir.to_string_lossy()],
+        work_dir,
+        Duration::from_secs(30),
+        None,
+    )
+    .await;
     if let Some(ref install_cmds) = task.workspace.install {
         for cmd in install_cmds {
-            // Split chained commands and filter out system package commands
-            // that can't run in a restricted container (apt-get, dpkg, etc.)
-            let effective_cmd = filter_install_command(cmd);
-            if effective_cmd.is_empty() {
-                info!(
-                    "[{}] Skipping system install: {}",
-                    task.id,
-                    &cmd[..cmd.len().min(100)]
-                );
-                continue;
-            }
-            info!("[{}] Installing: {}", task.id, effective_cmd);
-            let (_, stderr, exit) = run_shell(
+            let effective_cmd = prepare_install_command(cmd);
+            info!(
+                "[{}] Installing (as {}): {}",
+                task.id,
+                agent_user(),
+                effective_cmd
+            );
+            let (_, stderr, exit) = run_shell_as_agent(
                 &effective_cmd,
                 &repo_dir,
                 Duration::from_secs(config.clone_timeout_secs),
@@ -536,20 +581,21 @@ async fn run_agent(
     tokio::fs::write(&prompt_path, prompt).await?;
 
     let argv_owned = agent_runner(agent_language, &script_name);
-    let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-    info!("Running agent: {:?}", argv);
+    let runner_cmd = argv_owned.join(" ");
+    info!("Running agent as {}: {}", agent_user(), runner_cmd);
 
-    let env_vars = [
-        ("TASK_PROMPT", prompt_path.to_string_lossy().to_string()),
-        ("REPO_DIR", repo_dir.to_string_lossy().to_string()),
-    ];
-    let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    let env_export = format!(
+        "export TASK_PROMPT={} REPO_DIR={} && {}",
+        shell_escape(&prompt_path.to_string_lossy()),
+        shell_escape(&repo_dir.to_string_lossy()),
+        runner_cmd,
+    );
 
-    let (stdout, stderr, exit) = run_cmd(
-        &argv,
+    let (stdout, stderr, exit) = run_shell_as_agent(
+        &env_export,
         repo_dir,
         Duration::from_secs(timeout_secs),
-        Some(&env_refs),
+        None,
     )
     .await?;
 
@@ -581,14 +627,10 @@ async fn run_tests(
             let _ = std::fs::set_permissions(&script_path, perms);
         }
 
-        debug!("Running test script: {}", name);
-        let result = run_cmd(
-            &["bash", &script_path.to_string_lossy()],
-            repo_dir,
-            Duration::from_secs(timeout_secs),
-            None,
-        )
-        .await;
+        debug!("Running test script as {}: {}", agent_user(), name);
+        let test_cmd = format!("bash {}", shell_escape(&script_path.to_string_lossy()));
+        let result =
+            run_shell_as_agent(&test_cmd, repo_dir, Duration::from_secs(timeout_secs), None).await;
 
         match result {
             Ok((stdout, stderr, exit)) => {
