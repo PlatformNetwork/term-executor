@@ -73,14 +73,25 @@ async fn run_shell(
     run_cmd(&["sh", "-c", shell_cmd], cwd, timeout, env).await
 }
 
-/// Filter out system-level package commands that can't run in restricted containers.
-/// Keeps project-level install commands (npm install, pip install, yarn install, etc.)
+/// Filter out system-level package commands that require root (apt-get, dpkg, etc.).
+/// In Basilica containers, the executor runs as non-root with no_new_privs,
+/// so apt/sudo commands cannot succeed at runtime.
+/// All system deps must be pre-installed in the Docker image at build time.
 fn filter_install_command(cmd: &str) -> String {
     let system_prefixes = [
-        "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ", "snap ", "flatpak ",
+        "apt-get",
+        "apt ",
+        "dpkg",
+        "yum ",
+        "dnf ",
+        "pacman ",
+        "apk ",
+        "snap ",
+        "flatpak ",
+        "sudo apt",
+        "sudo dpkg",
     ];
 
-    // Split on && and filter out system commands
     let parts: Vec<&str> = cmd.split("&&").collect();
     let filtered: Vec<&str> = parts
         .iter()
@@ -349,8 +360,6 @@ async fn run_task_pipeline(
     result.status = TaskStatus::InstallingDeps;
     if let Some(ref install_cmds) = task.workspace.install {
         for cmd in install_cmds {
-            // Split chained commands and filter out system package commands
-            // that can't run in a restricted container (apt-get, dpkg, etc.)
             let effective_cmd = filter_install_command(cmd);
             if effective_cmd.is_empty() {
                 info!(

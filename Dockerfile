@@ -10,20 +10,43 @@ RUN cargo build --release && strip target/release/term-executor
 
 # ── Runtime stage ──
 FROM debian:bookworm-slim
+
+# Pre-install all common runtimes and tools at build time (as root)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl unzip libssl3 libssl-dev pkg-config \
-    python3 python3-pip python3-venv \
-    build-essential nodejs npm \
+    ca-certificates git curl wget unzip libssl3 libssl-dev pkg-config sudo \
+    python3 python3-pip python3-venv python3-dev \
+    build-essential gcc g++ make cmake autoconf automake libtool \
+    nodejs npm \
     golang-go \
-    default-jdk maven \
+    default-jdk maven gradle \
+    ruby ruby-dev \
+    libffi-dev libxml2-dev libxslt1-dev zlib1g-dev libyaml-dev \
+    libreadline-dev libncurses-dev libgdbm-dev libdb-dev \
+    sqlite3 libsqlite3-dev postgresql-client libpq-dev \
+    imagemagick libmagickwand-dev \
+    jq \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && npm install -g corepack yarn pnpm \
     && corepack enable \
     && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rm -rf /var/lib/apt/lists/*
 ENV PATH="/root/.cargo/bin:${PATH}"
+
+# Create non-root 'agent' user to run the executor and all agent code.
+# Basilica containers have no_new_privs, so sudo is unavailable at runtime.
+# All system deps must be pre-installed above (as root during build).
+RUN useradd -m -s /bin/bash agent \
+    && cp -r /root/.cargo /home/agent/.cargo \
+    && chown -R agent:agent /home/agent/.cargo \
+    && mkdir -p /home/agent/.local/bin \
+    && chown -R agent:agent /home/agent
+
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
-RUN mkdir -p /tmp/sessions
+RUN mkdir -p /tmp/sessions && chown agent:agent /tmp/sessions
+
+USER agent
+ENV HOME=/home/agent
+ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:${PATH}"
 ENV IMAGE_NAME=platformnetwork/term-executor
 ENV IMAGE_DIGEST=""
 EXPOSE 8080
