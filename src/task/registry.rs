@@ -88,15 +88,30 @@ fn build_test_script(test_patch: &str, fail_to_pass: Option<&str>) -> String {
         if !tests.is_empty() {
             script.push_str("# Run fail-to-pass tests\n");
             for test in &tests {
-                script.push_str(&format!("python -m pytest {} -x\n", test));
+                if is_full_command(test) {
+                    // Entry is a complete command (e.g. "npx playwright test ...")
+                    script.push_str(&format!("{}\n", test));
+                } else {
+                    // Entry is a pytest path
+                    script.push_str(&format!("python3 -m pytest {} -x\n", test));
+                }
             }
         }
     } else if !test_patch.is_empty() {
         script.push_str("# Run test suite\n");
-        script.push_str("python -m pytest -x\n");
+        script.push_str("python3 -m pytest -x\n");
     }
 
     script
+}
+
+fn is_full_command(test: &str) -> bool {
+    let cmd_prefixes = [
+        "npx ", "npm ", "node ", "yarn ", "pnpm ", "python ", "python3 ", "pytest ", "cargo ",
+        "make ", "go ", "mvn ", "gradle ", "dotnet ", "ruby ", "bundle ", "sh ", "bash ", "./",
+    ];
+    let t = test.trim();
+    cmd_prefixes.iter().any(|p| t.starts_with(p))
 }
 
 fn parse_test_list(raw: &str) -> Vec<String> {
@@ -116,8 +131,33 @@ fn parse_test_list(raw: &str) -> Vec<String> {
         .collect()
 }
 
+fn auto_install_commands(language: &str) -> Option<Vec<String>> {
+    match language {
+        "python" => Some(vec![
+            "pip install -e '.[dev,test]' 2>/dev/null || pip install -e . 2>/dev/null || true".to_string(),
+            "pip install pytest 2>/dev/null || true".to_string(),
+        ]),
+        "javascript" | "typescript" => Some(vec![
+            "npm install --legacy-peer-deps 2>/dev/null || yarn install --frozen-lockfile 2>/dev/null || true".to_string(),
+        ]),
+        "go" => Some(vec![
+            "go mod download 2>/dev/null || true".to_string(),
+        ]),
+        "rust" => Some(vec![
+            "cargo fetch 2>/dev/null || true".to_string(),
+        ]),
+        _ => Some(vec![
+            "pip install -e . 2>/dev/null || npm install 2>/dev/null || true".to_string(),
+        ]),
+    }
+}
+
 fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
     let repo_url = build_repo_url(&entry.repo);
+    let language = entry
+        .language
+        .clone()
+        .unwrap_or_else(|| "python".to_string());
 
     let f2p: Option<Vec<String>> = entry
         .fail_to_pass
@@ -128,12 +168,14 @@ fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
+    let install = auto_install_commands(&language);
+
     let workspace = WorkspaceConfig {
         repo: repo_url,
         version: entry.version.clone().unwrap_or_default(),
         base_commit: Some(entry.base_commit.clone()),
-        install: None,
-        language: Some("python".to_string()),
+        install,
+        language: Some(language),
         fail_to_pass: f2p,
         pass_to_pass: p2p,
         install_config: None,
@@ -311,7 +353,7 @@ mod tests {
         let script = build_test_script("diff --git a/t.py b/t.py", None);
         assert!(script.contains("git apply"));
         assert!(script.contains("diff --git a/t.py b/t.py"));
-        assert!(script.contains("python -m pytest -x"));
+        assert!(script.contains("python3 -m pytest -x"));
     }
 
     #[test]
@@ -321,7 +363,7 @@ mod tests {
             Some(r#"["tests/test_orm.py::test_query"]"#),
         );
         assert!(script.contains("git apply"));
-        assert!(script.contains("python -m pytest tests/test_orm.py::test_query -x"));
+        assert!(script.contains("python3 -m pytest tests/test_orm.py::test_query -x"));
     }
 
     #[test]

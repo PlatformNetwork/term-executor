@@ -13,7 +13,8 @@ FROM debian:bookworm-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl libssl3 \
     python3 python3-pip python3-venv \
-    build-essential \
+    build-essential nodejs npm \
+    && ln -sf /usr/bin/python3 /usr/bin/python \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
 RUN groupadd --system executor && useradd --system --gid executor --create-home executor \
