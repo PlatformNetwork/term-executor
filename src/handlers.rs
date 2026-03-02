@@ -47,6 +47,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/upload-agent", post(upload_agent))
         .route("/upload-agent-json", post(upload_agent_json))
         .route("/agent-code", get(get_agent_code))
+        .route("/code-hash", get(get_code_hash))
         .route("/submit", post(submit_batch))
         .route("/batch/:id", get(get_batch))
         .route("/batch/:id/tasks", get(get_batch_tasks))
@@ -408,6 +409,65 @@ async fn get_agent_code(
             ),
         )),
     }
+}
+
+async fn get_code_hash(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let archive = state.agent_archive.read().await;
+    let archive_bytes = archive.as_deref().ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no_agent", "message": "No agent archive uploaded yet"})),
+        )
+    })?;
+
+    let archive_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(archive_bytes);
+        hex::encode(hasher.finalize())
+    };
+
+    let cursor = std::io::Cursor::new(archive_bytes);
+    let mut zip = zip::ZipArchive::new(cursor).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("invalid zip: {}", e)})),
+        )
+    })?;
+
+    let mut source_content = String::new();
+    let mut file_names = Vec::new();
+    for i in 0..zip.len() {
+        if let Ok(file) = zip.by_index(i) {
+            if !file.is_dir() {
+                file_names.push(file.name().to_string());
+            }
+        }
+    }
+    file_names.sort();
+
+    for name in &file_names {
+        if let Ok(mut file) = zip.by_name(name) {
+            let mut content = String::new();
+            if std::io::Read::read_to_string(&mut file, &mut content).is_ok() {
+                source_content.push_str(&content);
+            }
+        }
+    }
+
+    let source_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(source_content.as_bytes());
+        hex::encode(hasher.finalize())
+    };
+
+    Ok(Json(serde_json::json!({
+        "archive_hash": archive_hash,
+        "source_hash": source_hash,
+        "source_length": source_content.len(),
+        "files": file_names,
+    })))
 }
 
 #[derive(Serialize)]
