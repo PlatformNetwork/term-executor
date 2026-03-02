@@ -705,9 +705,10 @@ async fn submit_batch(
             let batch = state.sessions.create_batch(total_tasks);
             let batch_id = batch.id.clone();
 
+            let env = state.agent_env.read().await.clone();
             state
                 .executor
-                .spawn_batch(batch, extracted, effective_concurrent);
+                .spawn_batch(batch, extracted, effective_concurrent, env);
 
             Ok((
                 StatusCode::ACCEPTED,
@@ -1231,7 +1232,8 @@ async fn submit_tasks(
     let batch_id = batch.id.clone();
     let concurrent = state.config.max_concurrent_tasks;
 
-    state.executor.spawn_batch(batch, final_archive, concurrent);
+    let env = state.agent_env.read().await.clone();
+    state.executor.spawn_batch(batch, final_archive, concurrent, env);
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1402,7 +1404,8 @@ async fn evaluate_with_stored_agent(
     let batch_id = batch.id.clone();
     let concurrent = state.config.max_concurrent_tasks;
 
-    state.executor.spawn_batch(batch, final_archive, concurrent);
+    let env = state.agent_env.read().await.clone();
+    state.executor.spawn_batch(batch, final_archive, concurrent, env);
 
     Ok((
         StatusCode::ACCEPTED,

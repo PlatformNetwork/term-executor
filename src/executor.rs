@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -122,6 +123,7 @@ impl Executor {
         batch: Arc<Batch>,
         archive: ExtractedArchive,
         concurrent_limit: usize,
+        agent_env: HashMap<String, String>,
     ) {
         let config = self.config.clone();
         let sessions = self.sessions.clone();
@@ -131,7 +133,7 @@ impl Executor {
             let start = std::time::Instant::now();
             metrics.start_batch();
 
-            let result = run_batch(&config, &batch, archive, concurrent_limit).await;
+            let result = run_batch(&config, &batch, archive, concurrent_limit, agent_env).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             let mut res = batch.result.lock().await;
@@ -176,10 +178,12 @@ async fn run_batch(
     batch: &Batch,
     archive: ExtractedArchive,
     concurrent_limit: usize,
+    agent_env: HashMap<String, String>,
 ) -> Result<BatchResult> {
     let total_tasks = archive.tasks.len();
     let agent_code = Arc::new(archive.agent_code);
     let agent_language = Arc::new(archive.agent_language);
+    let agent_env = Arc::new(agent_env);
 
     {
         let mut res = batch.result.lock().await;
@@ -210,6 +214,7 @@ async fn run_batch(
         let events_tx = batch.events_tx.clone();
         let agent_code = agent_code.clone();
         let agent_language = agent_language.clone();
+        let agent_env = agent_env.clone();
         let semaphore = semaphore.clone();
         let task_results = task_results.clone();
         let cancel_rx = batch.cancel.subscribe();
@@ -236,7 +241,7 @@ async fn run_batch(
             });
 
             let result =
-                run_single_task(&config, &task, &agent_code, &agent_language, cancel_rx).await;
+                run_single_task(&config, &task, &agent_code, &agent_language, &agent_env, cancel_rx).await;
 
             let _ = events_tx.send(crate::session::WsEvent {
                 event: "task_complete".to_string(),
@@ -291,6 +296,7 @@ async fn run_single_task(
     task: &SweForgeTask,
     agent_code: &str,
     agent_language: &str,
+    agent_env: &HashMap<String, String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> TaskResult {
     let start = std::time::Instant::now();
@@ -308,6 +314,7 @@ async fn run_single_task(
         task,
         agent_code,
         agent_language,
+        agent_env,
         &work_dir,
         &cancel_rx,
     )
@@ -336,6 +343,7 @@ async fn run_task_pipeline(
     task: &SweForgeTask,
     agent_code: &str,
     agent_language: &str,
+    agent_env: &HashMap<String, String>,
     work_dir: &Path,
     cancel_rx: &tokio::sync::watch::Receiver<bool>,
 ) -> Result<TaskResult> {
@@ -399,6 +407,7 @@ async fn run_task_pipeline(
         &task.prompt,
         &repo_dir,
         config.agent_timeout_secs,
+        agent_env,
     )
     .await?;
 
@@ -535,6 +544,7 @@ async fn run_agent(
     prompt: &str,
     repo_dir: &Path,
     timeout_secs: u64,
+    agent_env: &HashMap<String, String>,
 ) -> Result<String> {
     let ext = agent_extension(agent_language);
     let script_name = format!("_agent_code{}", ext);
@@ -544,15 +554,23 @@ async fn run_agent(
     let prompt_path = repo_dir.join("_task_prompt.md");
     tokio::fs::write(&prompt_path, prompt).await?;
 
-    let argv_owned = agent_runner(agent_language, &script_name);
+    let mut argv_owned = agent_runner(agent_language, &script_name);
+    // Pass --instruction for Python agents (baseagent convention)
+    if matches!(agent_language.to_lowercase().as_str(), "python" | "py") {
+        argv_owned.push("--instruction".into());
+        argv_owned.push(prompt.into());
+    }
     let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-    info!("Running agent: {:?}", argv);
+    info!("Running agent: {:?} with {} env vars", argv, agent_env.len());
 
-    let env_vars = [
-        ("TASK_PROMPT", prompt_path.to_string_lossy().to_string()),
-        ("REPO_DIR", repo_dir.to_string_lossy().to_string()),
+    let mut all_env: Vec<(String, String)> = vec![
+        ("TASK_PROMPT".into(), prompt_path.to_string_lossy().to_string()),
+        ("REPO_DIR".into(), repo_dir.to_string_lossy().to_string()),
     ];
-    let env_refs: Vec<(&str, &str)> = env_vars.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    for (k, v) in agent_env {
+        all_env.push((k.clone(), v.clone()));
+    }
+    let env_refs: Vec<(&str, &str)> = all_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
 
     let (stdout, stderr, exit) = run_cmd(
         &argv,
