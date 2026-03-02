@@ -597,7 +597,7 @@ async fn run_agent(
         if agent_dir.join("requirements.txt").exists() {
             info!("Installing agent requirements.txt");
             let (_, stderr, exit) = run_shell(
-                "pip install -q -r requirements.txt 2>&1 || pip3 install -q -r requirements.txt 2>&1 || true",
+                "pip install --break-system-packages -q -r requirements.txt 2>&1 || pip3 install --break-system-packages -q -r requirements.txt 2>&1 || true",
                 &agent_dir,
                 Duration::from_secs(120),
                 None,

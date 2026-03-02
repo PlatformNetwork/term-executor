@@ -41,6 +41,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
+# Allow pip to install packages system-wide (bypass PEP 668)
+RUN mkdir -p /etc/pip && printf '[global]\nbreak-system-packages = true\n' > /etc/pip/pip.conf
+
 # Create non-root 'agent' user to run the executor and all agent code.
 # Basilica containers have no_new_privs, so sudo is unavailable at runtime.
 # All system deps must be pre-installed above (as root during build).
