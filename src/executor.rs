@@ -240,8 +240,15 @@ async fn run_batch(
                 data: serde_json::json!({ "task_id": task_id }),
             });
 
-            let result =
-                run_single_task(&config, &task, &agent_code, &agent_language, &agent_env, cancel_rx).await;
+            let result = run_single_task(
+                &config,
+                &task,
+                &agent_code,
+                &agent_language,
+                &agent_env,
+                cancel_rx,
+            )
+            .await;
 
             let _ = events_tx.send(crate::session::WsEvent {
                 event: "task_complete".to_string(),
@@ -561,16 +568,26 @@ async fn run_agent(
         argv_owned.push(prompt.into());
     }
     let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
-    info!("Running agent: {:?} with {} env vars", argv, agent_env.len());
+    info!(
+        "Running agent: {:?} with {} env vars",
+        argv,
+        agent_env.len()
+    );
 
     let mut all_env: Vec<(String, String)> = vec![
-        ("TASK_PROMPT".into(), prompt_path.to_string_lossy().to_string()),
+        (
+            "TASK_PROMPT".into(),
+            prompt_path.to_string_lossy().to_string(),
+        ),
         ("REPO_DIR".into(), repo_dir.to_string_lossy().to_string()),
     ];
     for (k, v) in agent_env {
         all_env.push((k.clone(), v.clone()));
     }
-    let env_refs: Vec<(&str, &str)> = all_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    let env_refs: Vec<(&str, &str)> = all_env
+        .iter()
+        .map(|(k, v)| (k.as_str(), v.as_str()))
+        .collect();
 
     let (stdout, stderr, exit) = run_cmd(
         &argv,

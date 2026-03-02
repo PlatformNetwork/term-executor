@@ -1233,7 +1233,9 @@ async fn submit_tasks(
     let concurrent = state.config.max_concurrent_tasks;
 
     let env = state.agent_env.read().await.clone();
-    state.executor.spawn_batch(batch, final_archive, concurrent, env);
+    state
+        .executor
+        .spawn_batch(batch, final_archive, concurrent, env);
 
     Ok((
         StatusCode::ACCEPTED,
@@ -1405,7 +1407,9 @@ async fn evaluate_with_stored_agent(
     let concurrent = state.config.max_concurrent_tasks;
 
     let env = state.agent_env.read().await.clone();
-    state.executor.spawn_batch(batch, final_archive, concurrent, env);
+    state
+        .executor
+        .spawn_batch(batch, final_archive, concurrent, env);
 
     Ok((
         StatusCode::ACCEPTED,
