@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 const DEFAULT_PORT: u16 = 8080;
 const DEFAULT_SESSION_TTL: u64 = 7200;
-const DEFAULT_MAX_CONCURRENT: usize = 8;
+const DEFAULT_MAX_CONCURRENT: usize = 6;
 const DEFAULT_CLONE_TIMEOUT: u64 = 600;
 const DEFAULT_AGENT_TIMEOUT: u64 = 600;
 const DEFAULT_TEST_TIMEOUT: u64 = 300;
@@ -50,7 +50,10 @@ impl Config {
         Ok(Self {
             port: env_parse("PORT", DEFAULT_PORT),
             session_ttl_secs: env_parse("SESSION_TTL_SECS", DEFAULT_SESSION_TTL),
-            max_concurrent_tasks: env_parse("MAX_CONCURRENT_TASKS", DEFAULT_MAX_CONCURRENT),
+            max_concurrent_tasks: std::env::var("CONCURRENTLY_TASKS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| env_parse("MAX_CONCURRENT_TASKS", DEFAULT_MAX_CONCURRENT)),
             clone_timeout_secs: env_parse("CLONE_TIMEOUT_SECS", DEFAULT_CLONE_TIMEOUT),
             agent_timeout_secs: env_parse("AGENT_TIMEOUT_SECS", DEFAULT_AGENT_TIMEOUT),
             test_timeout_secs: env_parse("TEST_TIMEOUT_SECS", DEFAULT_TEST_TIMEOUT),
@@ -136,7 +139,7 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         let cfg = Config::from_env().expect("default config should be valid");
         assert_eq!(cfg.port, DEFAULT_PORT);
-        assert_eq!(cfg.max_concurrent_tasks, DEFAULT_MAX_CONCURRENT);
+        assert_eq!(cfg.max_concurrent_tasks, 6);
         assert_eq!(cfg.bittensor_netuid, 100);
         assert!((cfg.consensus_threshold - 0.5).abs() < f64::EPSILON);
     }
