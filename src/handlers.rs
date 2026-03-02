@@ -284,30 +284,53 @@ async fn upload_agent_json(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let expected = state.config.sudo_password.as_deref().ok_or_else(|| {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "upload_disabled"})))
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "upload_disabled"})),
+        )
     })?;
 
     let pw = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
     if !constant_time_eq(pw.as_bytes(), expected.as_bytes()) {
-        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "invalid_password"}))));
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "invalid_password"})),
+        ));
     }
 
-    let archive_b64 = body.get("archive_base64").and_then(|v| v.as_str()).ok_or_else(|| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing archive_base64 field"})))
-    })?;
+    let archive_b64 = body
+        .get("archive_base64")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": "missing archive_base64 field"})),
+            )
+        })?;
 
-    let archive_bytes = base64::engine::general_purpose::STANDARD.decode(archive_b64).map_err(|e| {
-        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid base64: {}", e)})))
-    })?;
+    let archive_bytes = base64::engine::general_purpose::STANDARD
+        .decode(archive_b64)
+        .map_err(|e| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("invalid base64: {}", e)})),
+            )
+        })?;
 
     if archive_bytes.is_empty() || archive_bytes.len() > 50 * 1024 * 1024 {
-        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "archive empty or too large"}))));
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "archive empty or too large"})),
+        ));
     }
 
     let files_count = {
         let cursor = std::io::Cursor::new(&archive_bytes);
         let archive = zip::ZipArchive::new(cursor).map_err(|e| {
-            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid zip: {}", e)})))
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": format!("invalid zip: {}", e)})),
+            )
         })?;
         archive.len()
     };
