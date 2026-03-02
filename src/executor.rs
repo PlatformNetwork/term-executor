@@ -350,6 +350,7 @@ async fn run_single_task(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_task_pipeline(
     config: &Config,
     task: &SweForgeTask,
