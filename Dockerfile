@@ -16,8 +16,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates git curl wget unzip libssl3 libssl-dev pkg-config sudo \
     python3 python3-pip python3-venv python3-dev \
     build-essential gcc g++ make cmake autoconf automake libtool \
-    nodejs npm \
-    golang-go \
     default-jdk maven gradle \
     ruby ruby-dev \
     libffi-dev libxml2-dev libxslt1-dev zlib1g-dev libyaml-dev \
@@ -26,10 +24,21 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     imagemagick libmagickwand-dev \
     jq \
     && ln -sf /usr/bin/python3 /usr/bin/python \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Go 1.23 (Debian bookworm ships 1.19 which is too old for most projects)
+RUN curl -fsSL https://go.dev/dl/go1.23.6.linux-amd64.tar.gz | tar -C /usr/local -xz
+ENV PATH="/usr/local/go/bin:${PATH}"
+
+# Install Node.js 20 LTS via NodeSource (Debian bookworm ships Node 18)
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
+    && apt-get install -y --no-install-recommends nodejs \
     && npm install -g corepack yarn pnpm \
     && corepack enable \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y \
     && rm -rf /var/lib/apt/lists/*
+
+# Install Rust toolchain
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Create non-root 'agent' user to run the executor and all agent code.
@@ -46,7 +55,8 @@ RUN mkdir -p /tmp/sessions && chown agent:agent /tmp/sessions
 
 USER agent
 ENV HOME=/home/agent
-ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:${PATH}"
+ENV PATH="/home/agent/.cargo/bin:/home/agent/.local/bin:/usr/local/go/bin:${PATH}"
+ENV GOPATH="/home/agent/go"
 ENV IMAGE_NAME=platformnetwork/term-executor
 ENV IMAGE_DIGEST=""
 EXPOSE 8080
