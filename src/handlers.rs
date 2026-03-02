@@ -1218,6 +1218,7 @@ async fn submit_tasks(
         tasks: hf_tasks,
         agent_code: extracted.agent_code,
         agent_language: extracted.agent_language,
+        agent_archive: extracted.agent_archive,
     };
 
     if state.sessions.has_active_batch() {
@@ -1392,6 +1393,7 @@ async fn evaluate_with_stored_agent(
         tasks: hf_tasks,
         agent_code,
         agent_language,
+        agent_archive: Some(archive_bytes),
     };
 
     if state.sessions.has_active_batch() {

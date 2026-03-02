@@ -183,6 +183,7 @@ async fn run_batch(
     let total_tasks = archive.tasks.len();
     let agent_code = Arc::new(archive.agent_code);
     let agent_language = Arc::new(archive.agent_language);
+    let agent_archive = Arc::new(archive.agent_archive);
     let agent_env = Arc::new(agent_env);
 
     {
@@ -214,6 +215,7 @@ async fn run_batch(
         let events_tx = batch.events_tx.clone();
         let agent_code = agent_code.clone();
         let agent_language = agent_language.clone();
+        let agent_archive = agent_archive.clone();
         let agent_env = agent_env.clone();
         let semaphore = semaphore.clone();
         let task_results = task_results.clone();
@@ -245,6 +247,7 @@ async fn run_batch(
                 &task,
                 &agent_code,
                 &agent_language,
+                agent_archive.as_deref(),
                 &agent_env,
                 cancel_rx,
             )
@@ -303,6 +306,7 @@ async fn run_single_task(
     task: &SweForgeTask,
     agent_code: &str,
     agent_language: &str,
+    agent_archive: Option<&[u8]>,
     agent_env: &HashMap<String, String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
 ) -> TaskResult {
@@ -321,6 +325,7 @@ async fn run_single_task(
         task,
         agent_code,
         agent_language,
+        agent_archive,
         agent_env,
         &work_dir,
         &cancel_rx,
@@ -350,6 +355,7 @@ async fn run_task_pipeline(
     task: &SweForgeTask,
     agent_code: &str,
     agent_language: &str,
+    agent_archive: Option<&[u8]>,
     agent_env: &HashMap<String, String>,
     work_dir: &Path,
     cancel_rx: &tokio::sync::watch::Receiver<bool>,
@@ -411,6 +417,7 @@ async fn run_task_pipeline(
     let agent_output = run_agent(
         agent_code,
         agent_language,
+        agent_archive,
         &task.prompt,
         &repo_dir,
         config.agent_timeout_secs,
@@ -548,29 +555,95 @@ fn agent_runner(language: &str, script_path: &str) -> Vec<String> {
 async fn run_agent(
     agent_code: &str,
     agent_language: &str,
+    agent_archive: Option<&[u8]>,
     prompt: &str,
     repo_dir: &Path,
     timeout_secs: u64,
     agent_env: &HashMap<String, String>,
 ) -> Result<String> {
-    let ext = agent_extension(agent_language);
-    let script_name = format!("_agent_code{}", ext);
-    let script_path = repo_dir.join(&script_name);
-    tokio::fs::write(&script_path, agent_code).await?;
-
     let prompt_path = repo_dir.join("_task_prompt.md");
     tokio::fs::write(&prompt_path, prompt).await?;
 
-    let mut argv_owned = agent_runner(agent_language, &script_name);
-    // Pass --instruction for Python agents (baseagent convention)
-    if matches!(agent_language.to_lowercase().as_str(), "python" | "py") {
-        argv_owned.push("--instruction".into());
-        argv_owned.push(prompt.into());
-    }
+    // If we have the full archive, extract it into the repo so the agent project
+    // structure (agent_code/agent.py, requirements.txt, src/, etc.) is preserved.
+    let (argv_owned, run_dir) = if let Some(archive_bytes) = agent_archive {
+        let agent_base = repo_dir.join("_agent");
+        let _ = tokio::fs::create_dir_all(&agent_base).await;
+        let base = agent_base.clone();
+        let data = archive_bytes.to_vec();
+        tokio::task::spawn_blocking(move || crate::task::extract_archive_bytes(&data, &base))
+            .await
+            .context("extract agent archive")??;
+
+        // Find agent_code/ dir inside extracted archive
+        let agent_dir = if agent_base.join("agent_code").exists() {
+            agent_base.join("agent_code")
+        } else {
+            // Look one level deeper
+            let mut found = agent_base.clone();
+            if let Ok(mut entries) = tokio::fs::read_dir(&agent_base).await {
+                while let Ok(Some(entry)) = entries.next_entry().await {
+                    if entry.path().join("agent_code").exists() {
+                        found = entry.path().join("agent_code");
+                        break;
+                    }
+                }
+            }
+            found
+        };
+
+        // Install Python dependencies if requirements.txt exists
+        if agent_dir.join("requirements.txt").exists() {
+            info!("Installing agent requirements.txt");
+            let (_, stderr, exit) = run_shell(
+                "pip install -q -r requirements.txt 2>&1 || pip3 install -q -r requirements.txt 2>&1 || true",
+                &agent_dir,
+                Duration::from_secs(120),
+                None,
+            )
+            .await?;
+            if exit != 0 {
+                warn!(
+                    "Agent pip install failed (exit {}): {}",
+                    exit,
+                    &stderr[..stderr.len().min(500)]
+                );
+            }
+        }
+
+        // Determine entry point
+        let entry = if agent_dir.join("agent.py").exists() {
+            "agent.py"
+        } else if agent_dir.join("main.py").exists() {
+            "main.py"
+        } else {
+            "agent.py"
+        };
+
+        let mut argv = vec!["python3".to_string(), entry.to_string()];
+        argv.push("--instruction".into());
+        argv.push(prompt.into());
+        (argv, agent_dir)
+    } else {
+        // Legacy path: single-file agent code written to _agent_code.py
+        let ext = agent_extension(agent_language);
+        let script_name = format!("_agent_code{}", ext);
+        let script_path = repo_dir.join(&script_name);
+        tokio::fs::write(&script_path, agent_code).await?;
+
+        let mut argv = agent_runner(agent_language, &script_name);
+        if matches!(agent_language.to_lowercase().as_str(), "python" | "py") {
+            argv.push("--instruction".into());
+            argv.push(prompt.into());
+        }
+        (argv, repo_dir.to_path_buf())
+    };
+
     let argv: Vec<&str> = argv_owned.iter().map(|s| s.as_str()).collect();
     info!(
-        "Running agent: {:?} with {} env vars",
+        "Running agent: {:?} in {} with {} env vars",
         argv,
+        run_dir.display(),
         agent_env.len()
     );
 
@@ -591,7 +664,7 @@ async fn run_agent(
 
     let (stdout, stderr, exit) = run_cmd(
         &argv,
-        repo_dir,
+        &run_dir,
         Duration::from_secs(timeout_secs),
         Some(&env_refs),
     )

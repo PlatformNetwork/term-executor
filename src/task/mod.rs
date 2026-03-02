@@ -58,6 +58,7 @@ pub struct ExtractedArchive {
     pub tasks: Vec<SweForgeTask>,
     pub agent_code: String,
     pub agent_language: String,
+    pub agent_archive: Option<Vec<u8>>,
 }
 
 pub fn extract_archive_bytes(data: &[u8], dest: &Path) -> Result<()> {
@@ -141,6 +142,7 @@ pub async fn extract_uploaded_archive(data: &[u8], dest: &Path) -> Result<Extrac
         tasks,
         agent_code,
         agent_language,
+        agent_archive: None,
     })
 }
 
