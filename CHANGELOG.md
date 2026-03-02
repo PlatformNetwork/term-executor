@@ -3,6 +3,43 @@
 
 ### Bug Fixes
 
+* add --break-system-packages for pip installs + pip.conf bypass PEP 668 ([14430c4](https://github.com/PlatformNetwork/term-executor/commit/14430c4c5a991f0af3d77820a764ca2428d9dd4a))
+* allow clippy too_many_arguments for run_task_pipeline ([6eb69c2](https://github.com/PlatformNetwork/term-executor/commit/6eb69c23050fedd89c86712bad32d2f6ac21c03b))
+* auto-install deps, python3 symlink, detect full commands in fail_to_pass, language-aware test scripts ([a38497f](https://github.com/PlatformNetwork/term-executor/commit/a38497f58d004cf0c3325b576b4a0f64a7c108bc))
+* config test race condition with env var mutex ([2963325](https://github.com/PlatformNetwork/term-executor/commit/2963325612199da06641704df0c71b37415bd745))
+* expose agent_output and agent_patch in TaskResult and API responses ([348c251](https://github.com/PlatformNetwork/term-executor/commit/348c2512644a5ef8e23d76d91a42fed042c070b1))
+* extract_agent_only for /evaluate - no tasks/ dir required ([2b90ee1](https://github.com/PlatformNetwork/term-executor/commit/2b90ee1d94439125e1df7c40864e77b6cf20eaf9))
+* filter out apt-get/system commands from install (Basilica blocks syscalls), keep project-level installs ([e5365da](https://github.com/PlatformNetwork/term-executor/commit/e5365da581b661052b079fbe0dae6e4185bf0f7c))
+* handle null test_patch from HuggingFace API (deserialize null as empty string) ([492d068](https://github.com/PlatformNetwork/term-executor/commit/492d06832ba463abf2d823067d7025353a900fa3))
+* increase clone/install timeout from 180s to 600s ([95cecc3](https://github.com/PlatformNetwork/term-executor/commit/95cecc3f534f4aaa042e20f2c329ed91df237a31))
+* install corepack/yarn/pnpm globally via npm in Dockerfile ([b7183e8](https://github.com/PlatformNetwork/term-executor/commit/b7183e844299c31c28ea0a28ef38fd4b5eca0ed3))
+* normalize repo URL in parse_task (add github.com prefix) ([398a6fd](https://github.com/PlatformNetwork/term-executor/commit/398a6fdba5167dbfd6353e10bac42157b8790701))
+* run as root (Basilica blocks sudo), remove sudo prefix logic ([477a433](https://github.com/PlatformNetwork/term-executor/commit/477a43348d2c9afb8817e4c2727d5ff22f90f1da))
+* sudo for apt-get in install commands, add golang/corepack/sudo to Dockerfile ([1aceb88](https://github.com/PlatformNetwork/term-executor/commit/1aceb88bf5ab97203819b4485d0cb7002c29269d))
+* upgrade Go to 1.23 and Node to 20 LTS in Dockerfile ([67ca713](https://github.com/PlatformNetwork/term-executor/commit/67ca713ff7497b89a003b75683a665543937ea25))
+* use :id path params for Axum 0.7 (not {id} which is 0.8) ([5dfa0c1](https://github.com/PlatformNetwork/term-executor/commit/5dfa0c1bbae4c2235198270e68e3bf8109f1368f))
+
+
+### Features
+
+* /evaluate endpoint using stored agent + TRUSTED_VALIDATORS whitelist ([b6aee7a](https://github.com/PlatformNetwork/term-executor/commit/b6aee7a49f107411ee33651141b44ac8263e3c71))
+* add /code-hash endpoint for code integrity verification ([0a8e01b](https://github.com/PlatformNetwork/term-executor/commit/0a8e01b58d25732a73eb5017c8d54fb30472a80c))
+* add /upload-agent-json endpoint for JSON-based agent upload ([9cfa1da](https://github.com/PlatformNetwork/term-executor/commit/9cfa1da9270b7e4d152c4d34200e2a3ff8a59f35))
+* add POST /submit_tasks endpoint + fix HuggingFace dataset compat ([d92444c](https://github.com/PlatformNetwork/term-executor/commit/d92444c1f9ddbc4b3502d949ac9fd3a381b9ada4))
+* agent user with sudo for apt-install, run all commands as non-root agent ([e3f574a](https://github.com/PlatformNetwork/term-executor/commit/e3f574a700e2de142afc96f5ac2c9d6b525435fd))
+* agent ZIP upload frontend with env vars + SUDO_PASSWORD auth ([3aa5184](https://github.com/PlatformNetwork/term-executor/commit/3aa518454755e35f855bc0c1779318e4a0149782))
+* change default max_concurrent_tasks from 8 to 6, support CONCURRENTLY_TASKS env var ([eaba581](https://github.com/PlatformNetwork/term-executor/commit/eaba581ce21c153d3fce23bdeed5c13f1fefe269))
+* extract full agent project instead of concatenating files ([3ac1023](https://github.com/PlatformNetwork/term-executor/commit/3ac1023c86246d3652ab9dbd8607979f37411b98))
+* fat Docker image with all language runtimes (java, rust, pnpm, unzip, etc.) ([3855f2d](https://github.com/PlatformNetwork/term-executor/commit/3855f2d7bb83090d2744defda90c22c0ef20c78b))
+* fetch task definitions from HF repo (workspace.yaml + tests/), remove auto_install hack ([7162a39](https://github.com/PlatformNetwork/term-executor/commit/7162a396d84025bc251bdeb291115e269479418f))
+* propagate agent_env to run_agent and pass --instruction arg to Python agents ([d922264](https://github.com/PlatformNetwork/term-executor/commit/d922264680f5e649c17f628b42a9bb379e36e746))
+* swe-bench/swe-forge integration - extend WorkspaceConfig with fail_to_pass/pass_to_pass/install_config/difficulty fields - parse swe-forge workspace.yaml native fields as test script fallback - capture git diff (agent patch) after agent execution - add /dataset endpoint to fetch from HuggingFace CortexLM/swe-forge - wire fail_to_pass/pass_to_pass in dataset entry conversion ([814259e](https://github.com/PlatformNetwork/term-executor/commit/814259ea2d552fae81c6d1749701dc524782c8e2))
+
+# [2.3.0](https://github.com/PlatformNetwork/term-executor/compare/v2.2.0...v2.3.0) (2026-03-02)
+
+
+### Bug Fixes
+
 * allow clippy too_many_arguments for run_task_pipeline ([6eb69c2](https://github.com/PlatformNetwork/term-executor/commit/6eb69c23050fedd89c86712bad32d2f6ac21c03b))
 * auto-install deps, python3 symlink, detect full commands in fail_to_pass, language-aware test scripts ([a38497f](https://github.com/PlatformNetwork/term-executor/commit/a38497f58d004cf0c3325b576b4a0f64a7c108bc))
 * config test race condition with env var mutex ([2963325](https://github.com/PlatformNetwork/term-executor/commit/2963325612199da06641704df0c71b37415bd745))
