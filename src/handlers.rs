@@ -5,6 +5,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
+use base64::Engine;
 use chrono::Utc;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -44,6 +45,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/status", get(status))
         .route("/metrics", get(metrics))
         .route("/upload-agent", post(upload_agent))
+        .route("/upload-agent-json", post(upload_agent_json))
         .route("/agent-code", get(get_agent_code))
         .route("/submit", post(submit_batch))
         .route("/batch/:id", get(get_batch))
@@ -260,6 +262,69 @@ async fn upload_agent(
                 if !key.is_empty() {
                     env_map.insert(key, val);
                 }
+            }
+        }
+    }
+    let env_count = env_map.len();
+
+    *state.agent_archive.write().await = Some(archive_bytes);
+    *state.agent_env.write().await = env_map;
+
+    Ok(Json(serde_json::json!({
+        "success": true,
+        "archive_hash": hash,
+        "size_bytes": size,
+        "files_count": files_count,
+        "env_count": env_count,
+    })))
+}
+
+async fn upload_agent_json(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
+    let expected = state.config.sudo_password.as_deref().ok_or_else(|| {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "upload_disabled"})))
+    })?;
+
+    let pw = body.get("password").and_then(|v| v.as_str()).unwrap_or("");
+    if !constant_time_eq(pw.as_bytes(), expected.as_bytes()) {
+        return Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "invalid_password"}))));
+    }
+
+    let archive_b64 = body.get("archive_base64").and_then(|v| v.as_str()).ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "missing archive_base64 field"})))
+    })?;
+
+    let archive_bytes = base64::engine::general_purpose::STANDARD.decode(archive_b64).map_err(|e| {
+        (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid base64: {}", e)})))
+    })?;
+
+    if archive_bytes.is_empty() || archive_bytes.len() > 50 * 1024 * 1024 {
+        return Err((StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "archive empty or too large"}))));
+    }
+
+    let files_count = {
+        let cursor = std::io::Cursor::new(&archive_bytes);
+        let archive = zip::ZipArchive::new(cursor).map_err(|e| {
+            (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("invalid zip: {}", e)})))
+        })?;
+        archive.len()
+    };
+
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&archive_bytes);
+        hex::encode(hasher.finalize())
+    };
+    let size = archive_bytes.len();
+
+    // Parse optional env vars
+    let mut env_map = std::collections::HashMap::new();
+    if let Some(env_obj) = body.get("env").and_then(|v| v.as_object()) {
+        for (k, v) in env_obj {
+            if let Some(s) = v.as_str() {
+                env_map.insert(k.clone(), s.to_string());
             }
         }
     }
