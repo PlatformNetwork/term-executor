@@ -612,19 +612,23 @@ async fn run_agent(
             }
         }
 
-        // Determine entry point
-        let entry = if agent_dir.join("agent.py").exists() {
-            "agent.py"
+        // Determine entry point (use absolute path so we can run from repo_dir)
+        let entry_file = if agent_dir.join("agent.py").exists() {
+            agent_dir.join("agent.py")
         } else if agent_dir.join("main.py").exists() {
-            "main.py"
+            agent_dir.join("main.py")
         } else {
-            "agent.py"
+            agent_dir.join("agent.py")
         };
 
-        let mut argv = vec!["python3".to_string(), entry.to_string()];
+        let mut argv = vec![
+            "python3".to_string(),
+            entry_file.to_string_lossy().to_string(),
+        ];
         argv.push("--instruction".into());
         argv.push(prompt.into());
-        (argv, agent_dir)
+        // Run from repo_dir so agent's CWD is the target repo
+        (argv, repo_dir.to_path_buf())
     } else {
         // Legacy path: single-file agent code written to _agent_code.py
         let ext = agent_extension(agent_language);
