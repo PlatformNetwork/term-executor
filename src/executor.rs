@@ -204,8 +204,7 @@ async fn run_batch(
         .await;
 
     let semaphore = Arc::new(Semaphore::new(concurrent_limit));
-    let task_results: Arc<tokio::sync::Mutex<Vec<TaskResult>>> =
-        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let batch_result = batch.result.clone();
 
     let mut handles = Vec::new();
 
@@ -218,23 +217,43 @@ async fn run_batch(
         let agent_archive = agent_archive.clone();
         let agent_env = agent_env.clone();
         let semaphore = semaphore.clone();
-        let task_results = task_results.clone();
+        let batch_result = batch_result.clone();
         let cancel_rx = batch.cancel.subscribe();
 
         let handle = tokio::spawn(async move {
+            // Mark task as queued in batch result immediately
+            {
+                let mut res = batch_result.lock().await;
+                let mut placeholder = TaskResult::new(task.id.clone());
+                placeholder.status = TaskStatus::Queued;
+                res.tasks.push(placeholder);
+            }
+
             let _permit = match semaphore.acquire().await {
                 Ok(p) => p,
                 Err(_) => {
                     warn!(task_id = %task.id, "Semaphore closed, skipping task");
-                    let mut result = TaskResult::new(task.id.clone());
-                    result.status = TaskStatus::Failed;
-                    result.error = Some("Semaphore closed".to_string());
-                    task_results.lock().await.push(result);
+                    let mut res = batch_result.lock().await;
+                    if let Some(t) = res.tasks.iter_mut().find(|t| t.task_id == task.id) {
+                        t.status = TaskStatus::Failed;
+                        t.error = Some("Semaphore closed".to_string());
+                    }
+                    res.completed_tasks += 1;
+                    res.failed_tasks += 1;
                     return;
                 }
             };
 
             let task_id = task.id.clone();
+
+            // Mark task as running
+            {
+                let mut res = batch_result.lock().await;
+                if let Some(t) = res.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                    t.status = TaskStatus::RunningAgent;
+                }
+            }
+
             let _ = events_tx.send(crate::session::WsEvent {
                 event: "task_started".to_string(),
                 batch_id: batch_id.clone(),
@@ -265,7 +284,23 @@ async fn run_batch(
                 }),
             });
 
-            task_results.lock().await.push(result);
+            // Replace placeholder with real result
+            {
+                let mut res = batch_result.lock().await;
+                if let Some(t) = res.tasks.iter_mut().find(|t| t.task_id == task_id) {
+                    *t = result;
+                }
+                res.completed_tasks += 1;
+                if res
+                    .tasks
+                    .iter()
+                    .any(|t| t.task_id == task_id && t.reward == 1.0)
+                {
+                    res.passed_tasks += 1;
+                } else {
+                    res.failed_tasks += 1;
+                }
+            }
         });
 
         handles.push(handle);
@@ -277,12 +312,9 @@ async fn run_batch(
         }
     }
 
-    let results = task_results.lock().await;
-    let completed = results.len();
-    let passed = results.iter().filter(|r| r.reward == 1.0).count();
-    let failed = completed - passed;
+    let res = batch.result.lock().await;
     let aggregate_reward = if total_tasks > 0 {
-        results.iter().map(|r| r.reward).sum::<f64>() / total_tasks as f64
+        res.tasks.iter().map(|r| r.reward).sum::<f64>() / total_tasks as f64
     } else {
         0.0
     };
@@ -291,10 +323,10 @@ async fn run_batch(
         batch_id: batch.id.clone(),
         status: BatchStatus::Completed,
         total_tasks,
-        completed_tasks: completed,
-        passed_tasks: passed,
-        failed_tasks: failed,
-        tasks: results.clone(),
+        completed_tasks: res.completed_tasks,
+        passed_tasks: res.passed_tasks,
+        failed_tasks: res.failed_tasks,
+        tasks: res.tasks.clone(),
         aggregate_reward,
         error: None,
         duration_ms: None,
