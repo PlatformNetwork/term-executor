@@ -74,33 +74,31 @@ async fn run_shell(
     run_cmd(&["sh", "-c", shell_cmd], cwd, timeout, env).await
 }
 
-/// Filter out system-level package commands that require root (apt-get, dpkg, etc.).
-/// In Basilica containers, the executor runs as non-root with no_new_privs,
-/// so apt/sudo commands cannot succeed at runtime.
-/// All system deps must be pre-installed in the Docker image at build time.
+/// Prepare install commands for execution.
+/// Basilica containers now support apt/sudo at runtime.
+/// Commands requiring root (apt-get, dpkg, etc.) are prefixed with sudo
+/// if not already using sudo.
 fn filter_install_command(cmd: &str) -> String {
-    let system_prefixes = [
-        "apt-get",
-        "apt ",
-        "dpkg",
-        "yum ",
-        "dnf ",
-        "pacman ",
-        "apk ",
-        "snap ",
-        "flatpak ",
-        "sudo apt",
-        "sudo dpkg",
+    let root_prefixes = [
+        "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ",
     ];
 
     let parts: Vec<&str> = cmd.split("&&").collect();
-    let filtered: Vec<&str> = parts
+    let processed: Vec<String> = parts
         .iter()
-        .map(|p| p.trim())
-        .filter(|p| !system_prefixes.iter().any(|prefix| p.starts_with(prefix)))
+        .map(|p| {
+            let trimmed = p.trim();
+            if trimmed.starts_with("sudo ") {
+                trimmed.to_string()
+            } else if root_prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
+                format!("sudo {}", trimmed)
+            } else {
+                trimmed.to_string()
+            }
+        })
         .collect();
 
-    filtered.join(" && ")
+    processed.join(" && ")
 }
 
 pub struct Executor {

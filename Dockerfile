@@ -45,9 +45,9 @@ ENV PATH="/root/.cargo/bin:${PATH}"
 RUN mkdir -p /etc/pip && printf '[global]\nbreak-system-packages = true\n' > /etc/pip/pip.conf
 
 # Create non-root 'agent' user to run the executor and all agent code.
-# Basilica containers have no_new_privs, so sudo is unavailable at runtime.
-# All system deps must be pre-installed above (as root during build).
+# Basilica containers now support sudo/apt at runtime.
 RUN useradd -m -s /bin/bash agent \
+    && echo "agent ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers \
     && cp -r /root/.cargo /home/agent/.cargo \
     && chown -R agent:agent /home/agent/.cargo \
     && mkdir -p /home/agent/.local/bin \
