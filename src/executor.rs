@@ -587,27 +587,24 @@ async fn ssh_exec(
     user: &str,
     cmd: &str,
     timeout: Duration,
+    ssh_key: Option<&str>,
 ) -> Result<(String, String, i32)> {
     let ssh_target = format!("{}@{}", user, host);
-    run_cmd(
-        &[
-            "ssh",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=10",
-            "-o", "LogLevel=ERROR",
-            "-p", &port.to_string(),
-            &ssh_target,
-            cmd,
-        ],
-        Path::new("/tmp"),
-        timeout,
-        None,
-    )
-    .await
+    let port_str = port.to_string();
+    let mut args: Vec<&str> = vec![
+        "ssh",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "ConnectTimeout=10",
+        "-o", "LogLevel=ERROR",
+    ];
+    if let Some(key) = ssh_key {
+        args.extend_from_slice(&["-i", key]);
+    }
+    args.extend_from_slice(&["-p", &port_str, &ssh_target, cmd]);
+    run_cmd(&args, Path::new("/tmp"), timeout, None).await
 }
 
-/// Transfer a file to a remote host via scp.
 async fn scp_to(
     host: &str,
     port: u16,
@@ -615,23 +612,22 @@ async fn scp_to(
     local_path: &Path,
     remote_path: &str,
     timeout: Duration,
+    ssh_key: Option<&str>,
 ) -> Result<()> {
     let dest = format!("{}@{}:{}", user, host, remote_path);
-    let (_, stderr, exit) = run_cmd(
-        &[
-            "scp",
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "LogLevel=ERROR",
-            "-P", &port.to_string(),
-            &local_path.to_string_lossy(),
-            &dest,
-        ],
-        Path::new("/tmp"),
-        timeout,
-        None,
-    )
-    .await?;
+    let port_str = port.to_string();
+    let local = local_path.to_string_lossy();
+    let mut args: Vec<&str> = vec![
+        "scp",
+        "-o", "StrictHostKeyChecking=no",
+        "-o", "UserKnownHostsFile=/dev/null",
+        "-o", "LogLevel=ERROR",
+    ];
+    if let Some(key) = ssh_key {
+        args.extend_from_slice(&["-i", key]);
+    }
+    args.extend_from_slice(&["-P", &port_str, &local, &dest]);
+    let (_, stderr, exit) = run_cmd(&args, Path::new("/tmp"), timeout, None).await?;
     if exit != 0 {
         anyhow::bail!("scp failed (exit {}): {}", exit, &stderr[..stderr.len().min(300)]);
     }
@@ -682,6 +678,8 @@ async fn run_task_on_basilica(
         task.id, rental_id, user, host, port
     );
 
+    let ssh_key = config.basilica_ssh_key.as_deref();
+
     // Run the task pipeline in the container, always clean up after
     let run = async {
         let work_dir = format!("/tmp/task-{}", task.id.replace('/', "__"));
@@ -703,7 +701,7 @@ async fn run_task_on_basilica(
             format!("mkdir -p {work_dir} && git clone --depth 50 --single-branch {repo_url} {work_dir}/repo")
         };
 
-        let (_, stderr, exit) = ssh_exec(host, port, user, &clone_cmd, timeout).await?;
+        let (_, stderr, exit) = ssh_exec(host, port, user, &clone_cmd, timeout, ssh_key).await?;
         if exit != 0 {
             anyhow::bail!("Clone failed on container (exit {}): {}", exit, &stderr[..stderr.len().min(500)]);
         }
@@ -722,7 +720,7 @@ async fn run_task_on_basilica(
                 }
                 info!("[{}] Installing on container: {}", task.id, &effective_cmd[..effective_cmd.len().min(120)]);
                 let install_cmd = format!("cd {work_dir}/repo && {effective_cmd}");
-                let (_, stderr, exit) = ssh_exec(host, port, user, &install_cmd, timeout).await?;
+                let (_, stderr, exit) = ssh_exec(host, port, user, &install_cmd, timeout, ssh_key).await?;
                 if exit != 0 {
                     warn!(
                         "[{}] Install failed on container (exit {}): {}",
@@ -745,14 +743,14 @@ async fn run_task_on_basilica(
         ssh_exec(
             host, port, user,
             &format!("cat > {work_dir}/repo/_task_prompt.md << 'TASKPROMPTEOF'\n{}\nTASKPROMPTEOF", task.prompt),
-            timeout,
+            timeout, ssh_key,
         ).await?;
 
         let agent_output = if let Some(archive_bytes) = agent_archive {
             // Upload agent archive via scp
             let local_tmp = std::env::temp_dir().join(format!("agent-{}.zip", uuid::Uuid::new_v4()));
             tokio::fs::write(&local_tmp, archive_bytes).await?;
-            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/agent.zip"), timeout).await?;
+            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/agent.zip"), timeout, ssh_key).await?;
             let _ = tokio::fs::remove_file(&local_tmp).await;
 
             // Extract and run on remote
@@ -775,7 +773,7 @@ async fn run_task_on_basilica(
 
             let (stdout, stderr, exit) = ssh_exec(
                 host, port, user, &run_agent_cmd,
-                Duration::from_secs(config.agent_timeout_secs),
+                Duration::from_secs(config.agent_timeout_secs), ssh_key,
             ).await?;
 
             if exit != 0 {
@@ -786,7 +784,7 @@ async fn run_task_on_basilica(
             // Legacy single-file agent
             let local_tmp = std::env::temp_dir().join(format!("agent-{}.py", uuid::Uuid::new_v4()));
             tokio::fs::write(&local_tmp, agent_code).await?;
-            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/repo/_agent_code.py"), timeout).await?;
+            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/repo/_agent_code.py"), timeout, ssh_key).await?;
             let _ = tokio::fs::remove_file(&local_tmp).await;
 
             let mut env_exports = String::new();
@@ -800,7 +798,7 @@ async fn run_task_on_basilica(
             let (stdout, stderr, exit) = ssh_exec(
                 host, port, user,
                 &format!("cd {work_dir}/repo && {env_exports} python3 _agent_code.py --instruction '{escaped_prompt}' 2>&1"),
-                Duration::from_secs(config.agent_timeout_secs),
+                Duration::from_secs(config.agent_timeout_secs), ssh_key,
             ).await?;
 
             if exit != 0 {
@@ -810,7 +808,7 @@ async fn run_task_on_basilica(
         };
 
         // 6. Capture agent patch
-        let agent_patch = match ssh_exec(host, port, user, &format!("cd {work_dir}/repo && git diff"), Duration::from_secs(30)).await {
+        let agent_patch = match ssh_exec(host, port, user, &format!("cd {work_dir}/repo && git diff"), Duration::from_secs(30), ssh_key).await {
             Ok((stdout, _, _)) => stdout,
             Err(_) => String::new(),
         };
@@ -830,7 +828,7 @@ async fn run_task_on_basilica(
             ssh_exec(
                 host, port, user,
                 &format!("mkdir -p $(dirname '{remote_path}') && cat > '{remote_path}' << 'TESTFILEEOF'\n{content}\nTESTFILEEOF"),
-                timeout,
+                timeout, ssh_key,
             ).await?;
         }
 
@@ -842,13 +840,13 @@ async fn run_task_on_basilica(
             ssh_exec(
                 host, port, user,
                 &format!("mkdir -p $(dirname '{remote_script}') && cat > '{remote_script}' << 'SCRIPTEOF'\n{content}\nSCRIPTEOF\nchmod +x '{remote_script}'"),
-                timeout,
+                timeout, ssh_key,
             ).await?;
 
             let (stdout, stderr, exit) = ssh_exec(
                 host, port, user,
                 &format!("cd {work_dir}/repo && bash '{remote_script}' 2>&1"),
-                Duration::from_secs(config.test_timeout_secs),
+                Duration::from_secs(config.test_timeout_secs), ssh_key,
             ).await.unwrap_or_else(|e| (String::new(), format!("Error: {:#}", e), -1));
 
             test_results.push(TaskTestResult {
@@ -885,7 +883,7 @@ async fn run_task_on_basilica(
 
     // Always clean up the container
     info!("[{}] Destroying container {}...", task.id, rental_id);
-    if let Err(e) = client.stop_rental(&rental_id).await {
+    if let Err(e) = client.stop_cpu_rental(&rental_id).await {
         warn!("[{}] Failed to stop container {}: {}", task.id, rental_id, e);
     }
 

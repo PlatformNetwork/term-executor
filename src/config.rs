@@ -34,6 +34,7 @@ pub struct Config {
     pub sudo_password: Option<String>,
     pub trusted_validators: Vec<String>,
     pub basilica_api_token: Option<String>,
+    pub basilica_ssh_key: Option<String>,
 }
 
 impl Config {
@@ -81,6 +82,9 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty()),
             basilica_api_token: std::env::var("BASILICA_API_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            basilica_ssh_key: std::env::var("BASILICA_SSH_KEY")
                 .ok()
                 .filter(|s| !s.is_empty()),
             trusted_validators: std::env::var("TRUSTED_VALIDATORS")

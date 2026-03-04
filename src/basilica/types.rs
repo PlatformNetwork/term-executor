@@ -74,11 +74,12 @@ pub struct RentalListItem {
 pub struct CpuOffering {
     pub id: String,
     pub provider: Option<String>,
-    pub cpu_count: Option<u32>,
-    pub memory_gb: Option<u32>,
+    pub vcpu_count: Option<u32>,
+    pub system_memory_gb: Option<u32>,
     pub storage_gb: Option<u32>,
-    pub hourly_rate_cents: Option<u32>,
+    pub hourly_rate: Option<String>,
     pub region: Option<String>,
+    pub availability: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,6 +103,26 @@ pub struct SecureCloudRentalResponse {
     pub ssh_command: Option<String>,
     pub hourly_cost: Option<f64>,
     pub is_spot: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureCloudRentalListResponse {
+    pub rentals: Vec<SecureCloudRentalListItem>,
+    pub total_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SecureCloudRentalListItem {
+    pub rental_id: String,
+    pub status: String,
+    pub ip_address: Option<String>,
+    pub ssh_command: Option<String>,
+    pub provider: Option<String>,
+    pub hourly_cost: Option<f64>,
+    pub created_at: Option<String>,
+    pub stopped_at: Option<String>,
+    pub vcpu_count: Option<u32>,
+    pub system_memory_gb: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -214,7 +235,7 @@ pub struct HealthResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceResponse {
-    pub balance: Option<f64>,
+    pub balance: Option<String>,
     pub last_updated: Option<String>,
 }
 
@@ -318,16 +339,18 @@ mod tests {
     #[test]
     fn test_cpu_offering_deserializes() {
         let json = r#"{
-            "id": "cpu-offer-1",
-            "provider": "citadel",
-            "cpu_count": 4,
-            "memory_gb": 8,
+            "id": "hyperstack-127",
+            "provider": "hyperstack",
+            "vcpu_count": 4,
+            "system_memory_gb": 4,
             "storage_gb": 100,
-            "hourly_rate_cents": 10,
-            "region": "us-east"
+            "hourly_rate": "0.3832400",
+            "region": "NORWAY-1",
+            "availability": true
         }"#;
         let offering: CpuOffering = serde_json::from_str(json).unwrap();
-        assert_eq!(offering.id, "cpu-offer-1");
-        assert_eq!(offering.cpu_count, Some(4));
+        assert_eq!(offering.id, "hyperstack-127");
+        assert_eq!(offering.vcpu_count, Some(4));
+        assert_eq!(offering.availability, Some(true));
     }
 }

@@ -129,6 +129,13 @@ impl BasilicaClient {
         self.handle_response(resp, "start_cpu_rental").await
     }
 
+    pub async fn list_cpu_rentals(&self) -> Result<SecureCloudRentalListResponse> {
+        let url = format!("{}/secure-cloud/cpu-rentals", self.base_url);
+        let resp = self.client.get(&url).send().await
+            .context("Failed to list CPU rentals")?;
+        self.handle_response(resp, "list_cpu_rentals").await
+    }
+
     pub async fn stop_cpu_rental(&self, rental_id: &str) -> Result<StopRentalResponse> {
         let url = format!("{}/secure-cloud/cpu-rentals/{}/stop", self.base_url, rental_id);
         info!("Stopping Basilica CPU rental: {}", rental_id);
@@ -211,63 +218,83 @@ impl BasilicaClient {
         let offerings = self.list_cpu_offerings().await?;
         let offering = offerings.nodes.iter()
             .filter(|o| {
-                min_cpu.map_or(true, |c| o.cpu_count.unwrap_or(0) >= c)
-                    && min_memory_gb.map_or(true, |m| o.memory_gb.unwrap_or(0) >= m)
+                o.availability.unwrap_or(false)
+                    && min_cpu.map_or(true, |c| o.vcpu_count.unwrap_or(0) >= c)
+                    && min_memory_gb.map_or(true, |m| o.system_memory_gb.unwrap_or(0) >= m)
             })
-            .min_by_key(|o| o.hourly_rate_cents.unwrap_or(u32::MAX))
+            .min_by(|a, b| {
+                let rate_a: f64 = a.hourly_rate.as_deref().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
+                let rate_b: f64 = b.hourly_rate.as_deref().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
+                rate_a.partial_cmp(&rate_b).unwrap_or(std::cmp::Ordering::Equal)
+            })
             .context("No CPU offering matches the requested specs")?;
 
         info!(
-            "Selected CPU offering: {} ({}cpu, {}GB, {}c/hr)",
+            "Selected CPU offering: {} ({}vcpu, {}GB, ${}/hr, {})",
             offering.id,
-            offering.cpu_count.unwrap_or(0),
-            offering.memory_gb.unwrap_or(0),
-            offering.hourly_rate_cents.unwrap_or(0),
+            offering.vcpu_count.unwrap_or(0),
+            offering.system_memory_gb.unwrap_or(0),
+            offering.hourly_rate.as_deref().unwrap_or("?"),
+            offering.provider.as_deref().unwrap_or("?"),
         );
 
         let rental = self.start_cpu_rental(&offering.id, ssh_key_id).await?;
         info!("CPU rental started: {} (status: {})", rental.rental_id, rental.status);
 
-        self.wait_for_ssh(&rental.rental_id).await
+        self.wait_for_cpu_ssh(&rental.rental_id).await
     }
 
-    /// Poll rental status until SSH is available or timeout.
-    async fn wait_for_ssh(&self, rental_id: &str) -> Result<ContainerInfo> {
+    /// Poll secure-cloud CPU rental status until SSH is available or timeout.
+    async fn wait_for_cpu_ssh(&self, rental_id: &str) -> Result<ContainerInfo> {
         for attempt in 1..=MAX_POLL_ATTEMPTS {
             tokio::time::sleep(std::time::Duration::from_secs(POLL_INTERVAL_SECS)).await;
 
-            let status = self.get_rental(rental_id).await;
-            match status {
-                Ok(s) => {
-                    debug!(
-                        "Rental {} poll {}/{}: status={}",
-                        rental_id, attempt, MAX_POLL_ATTEMPTS, s.status
-                    );
+            match self.list_cpu_rentals().await {
+                Ok(list) => {
+                    if let Some(r) = list.rentals.iter().find(|r| r.rental_id == rental_id) {
+                        debug!(
+                            "Rental {} poll {}/{}: status={} ip={:?}",
+                            rental_id, attempt, MAX_POLL_ATTEMPTS, r.status, r.ip_address
+                        );
 
-                    if s.status == "running" || s.status == "active" {
-                        if let Some(ref creds) = s.ssh_credentials {
-                            if creds.host.is_some() {
-                                info!("Rental {} is ready with SSH access", rental_id);
+                        if r.status == "running" || r.status == "active" {
+                            if let Some(ref ip) = r.ip_address {
+                                let ssh_user = r.ssh_command.as_deref()
+                                    .and_then(|c| c.strip_prefix("ssh "))
+                                    .and_then(|c| c.split('@').next())
+                                    .unwrap_or("root")
+                                    .to_string();
+
+                                // Verify SSH is actually reachable before returning
+                                let ssh_key_path = std::env::var("BASILICA_SSH_KEY").ok();
+                                if !self.check_ssh_ready(ip, 22, &ssh_user, ssh_key_path.as_deref()).await {
+                                    debug!("Rental {} has IP {} but SSH not ready yet", rental_id, ip);
+                                    continue;
+                                }
+
+                                info!("Rental {} is ready: {}@{}", rental_id, ssh_user, ip);
                                 return Ok(ContainerInfo {
                                     rental_id: rental_id.to_string(),
-                                    status: s.status,
-                                    ssh_host: creds.host.clone(),
-                                    ssh_port: creds.port,
-                                    ssh_user: creds.username.clone(),
-                                    ssh_command: creds.ssh_command.clone(),
-                                    provider: s.node.clone(),
-                                    created_at: s.created_at.clone(),
+                                    status: r.status.clone(),
+                                    ssh_host: Some(ip.clone()),
+                                    ssh_port: Some(22),
+                                    ssh_user: Some(ssh_user),
+                                    ssh_command: r.ssh_command.clone(),
+                                    provider: r.provider.clone(),
+                                    created_at: r.created_at.clone(),
                                 });
                             }
                         }
-                    }
 
-                    if s.status == "failed" || s.status == "error" || s.status == "terminated" {
-                        anyhow::bail!("Rental {} entered terminal state: {}", rental_id, s.status);
+                        if r.status == "failed" || r.status == "error" || r.status == "stopped" {
+                            anyhow::bail!("Rental {} entered terminal state: {}", rental_id, r.status);
+                        }
+                    } else {
+                        warn!("Rental {} not found in CPU rental list", rental_id);
                     }
                 }
                 Err(e) => {
-                    warn!("Failed to poll rental {}: {}", rental_id, e);
+                    warn!("Failed to poll CPU rentals: {}", e);
                 }
             }
         }
@@ -277,6 +304,33 @@ impl BasilicaClient {
             rental_id,
             MAX_POLL_ATTEMPTS as u64 * POLL_INTERVAL_SECS
         )
+    }
+
+    /// Check if SSH is reachable on the given host by running a simple command.
+    async fn check_ssh_ready(&self, host: &str, port: u16, user: &str, ssh_key: Option<&str>) -> bool {
+        let target = format!("{}@{}", user, host);
+        let port_str = port.to_string();
+        let mut args = vec![
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=5",
+            "-o", "LogLevel=ERROR",
+        ];
+        if let Some(key) = ssh_key {
+            args.extend_from_slice(&["-i", key]);
+        }
+        args.extend_from_slice(&["-p", &port_str, &target, "echo ok"]);
+        let result = tokio::process::Command::new("ssh")
+            .args(&args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await;
+
+        match result {
+            Ok(output) => output.status.success(),
+            Err(_) => false,
+        }
     }
 
     // ── Response handling ──
