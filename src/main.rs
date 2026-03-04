@@ -45,21 +45,6 @@ async fn main() {
     let sessions = Arc::new(session::SessionManager::new(config.session_ttl_secs));
     let metrics_store = metrics::Metrics::new();
     let nonce_store = Arc::new(auth::NonceStore::new());
-    let executor = Arc::new(executor::Executor::new(
-        config.clone(),
-        sessions.clone(),
-        metrics_store.clone(),
-    ));
-
-    let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
-    if !config.trusted_validators.is_empty() {
-        info!(
-            "Adding {} trusted validators (bypass consensus)",
-            config.trusted_validators.len()
-        );
-        validator_whitelist.add_trusted(&config.trusted_validators);
-    }
-    let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
 
     let basilica_client = config.basilica_api_token.as_ref().and_then(|token| {
         match basilica::client::BasilicaClient::new(token) {
@@ -73,6 +58,23 @@ async fn main() {
             }
         }
     });
+
+    let executor = Arc::new(executor::Executor::new(
+        config.clone(),
+        sessions.clone(),
+        metrics_store.clone(),
+        basilica_client.clone(),
+    ));
+
+    let validator_whitelist = validator_whitelist::ValidatorWhitelist::new();
+    if !config.trusted_validators.is_empty() {
+        info!(
+            "Adding {} trusted validators (bypass consensus)",
+            config.trusted_validators.len()
+        );
+        validator_whitelist.add_trusted(&config.trusted_validators);
+    }
+    let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
 
     let state = Arc::new(handlers::AppState {
         config: config.clone(),

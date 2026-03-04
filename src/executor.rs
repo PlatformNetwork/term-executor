@@ -76,8 +76,8 @@ async fn run_shell(
 
 /// Prepare install commands for execution.
 /// Basilica containers now support apt/sudo at runtime.
-/// Commands requiring root (apt-get, dpkg, etc.) are prefixed with sudo
-/// if not already using sudo.
+/// - Commands requiring root (apt-get, dpkg, etc.) are prefixed with sudo.
+/// - pip/pip3 install commands get --break-system-packages to bypass PEP 668.
 fn filter_install_command(cmd: &str) -> String {
     let root_prefixes = [
         "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ",
@@ -89,11 +89,11 @@ fn filter_install_command(cmd: &str) -> String {
         .map(|p| {
             let trimmed = p.trim();
             if trimmed.starts_with("sudo ") {
-                trimmed.to_string()
+                fix_pip_pep668(trimmed)
             } else if root_prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
-                format!("sudo {}", trimmed)
+                fix_pip_pep668(&format!("sudo {}", trimmed))
             } else {
-                trimmed.to_string()
+                fix_pip_pep668(trimmed)
             }
         })
         .collect();
@@ -101,18 +101,46 @@ fn filter_install_command(cmd: &str) -> String {
     processed.join(" && ")
 }
 
+fn fix_pip_pep668(cmd: &str) -> String {
+    if (cmd.contains("pip install") || cmd.contains("pip3 install"))
+        && !cmd.contains("--break-system-packages")
+        && !cmd.contains("venv")
+    {
+        cmd.replace("pip install", "pip install --break-system-packages")
+            .replace("pip3 install", "pip3 install --break-system-packages")
+    } else {
+        cmd.to_string()
+    }
+}
+
+static APT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn needs_apt_lock(cmd: &str) -> bool {
+    ["apt-get", "apt ", "dpkg", "sudo apt"]
+        .iter()
+        .any(|p| cmd.contains(p))
+}
+
+
 pub struct Executor {
     config: Arc<Config>,
     sessions: Arc<SessionManager>,
     metrics: Arc<Metrics>,
+    basilica: Option<Arc<crate::basilica::client::BasilicaClient>>,
 }
 
 impl Executor {
-    pub fn new(config: Arc<Config>, sessions: Arc<SessionManager>, metrics: Arc<Metrics>) -> Self {
+    pub fn new(
+        config: Arc<Config>,
+        sessions: Arc<SessionManager>,
+        metrics: Arc<Metrics>,
+        basilica: Option<Arc<crate::basilica::client::BasilicaClient>>,
+    ) -> Self {
         Self {
             config,
             sessions,
             metrics,
+            basilica,
         }
     }
 
@@ -126,12 +154,14 @@ impl Executor {
         let config = self.config.clone();
         let sessions = self.sessions.clone();
         let metrics = self.metrics.clone();
+        let basilica = self.basilica.clone();
 
         tokio::spawn(async move {
             let start = std::time::Instant::now();
             metrics.start_batch();
 
-            let result = run_batch(&config, &batch, archive, concurrent_limit, agent_env).await;
+            let result =
+                run_batch(&config, &batch, archive, concurrent_limit, agent_env, basilica).await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             let mut res = batch.result.lock().await;
@@ -177,6 +207,7 @@ async fn run_batch(
     archive: ExtractedArchive,
     concurrent_limit: usize,
     agent_env: HashMap<String, String>,
+    basilica: Option<Arc<crate::basilica::client::BasilicaClient>>,
 ) -> Result<BatchResult> {
     let total_tasks = archive.tasks.len();
     let agent_code = Arc::new(archive.agent_code);
@@ -217,6 +248,7 @@ async fn run_batch(
         let semaphore = semaphore.clone();
         let batch_result = batch_result.clone();
         let cancel_rx = batch.cancel.subscribe();
+        let basilica = basilica.clone();
 
         let handle = tokio::spawn(async move {
             // Mark task as queued in batch result immediately
@@ -267,6 +299,7 @@ async fn run_batch(
                 agent_archive.as_deref(),
                 &agent_env,
                 cancel_rx,
+                basilica.as_ref(),
             )
             .await;
 
@@ -339,10 +372,32 @@ async fn run_single_task(
     agent_archive: Option<&[u8]>,
     agent_env: &HashMap<String, String>,
     cancel_rx: tokio::sync::watch::Receiver<bool>,
+    basilica: Option<&Arc<crate::basilica::client::BasilicaClient>>,
 ) -> TaskResult {
     let start = std::time::Instant::now();
     let mut result = TaskResult::new(task.id.clone());
 
+    // If Basilica is configured, run the task in a dedicated container
+    if let Some(client) = basilica {
+        let eval_result =
+            run_task_on_basilica(config, task, agent_code, agent_language, agent_archive, agent_env, &cancel_rx, client)
+                .await;
+        let duration_ms = start.elapsed().as_millis() as u64;
+        return match eval_result {
+            Ok(mut r) => {
+                r.duration_ms = Some(duration_ms);
+                r
+            }
+            Err(e) => {
+                result.status = TaskStatus::Failed;
+                result.error = Some(format!("{:#}", e));
+                result.duration_ms = Some(duration_ms);
+                result
+            }
+        };
+    }
+
+    // Fallback: local execution
     let work_dir = config.workspace_base.join(&task.id);
     if let Err(e) = tokio::fs::create_dir_all(&work_dir).await {
         result.status = TaskStatus::Failed;
@@ -422,13 +477,24 @@ async fn run_task_pipeline(
                 continue;
             }
             info!("[{}] Installing: {}", task.id, effective_cmd);
-            let (_, stderr, exit) = run_shell(
-                &effective_cmd,
-                &repo_dir,
-                Duration::from_secs(config.clone_timeout_secs),
-                None,
-            )
-            .await?;
+            let (_, stderr, exit) = if needs_apt_lock(&effective_cmd) {
+                let _lock = APT_LOCK.lock().await;
+                run_shell(
+                    &effective_cmd,
+                    &repo_dir,
+                    Duration::from_secs(config.clone_timeout_secs),
+                    None,
+                )
+                .await?
+            } else {
+                run_shell(
+                    &effective_cmd,
+                    &repo_dir,
+                    Duration::from_secs(config.clone_timeout_secs),
+                    None,
+                )
+                .await?
+            };
             if exit != 0 {
                 warn!(
                     "[{}] Install failed (exit {}): {}",
@@ -511,6 +577,319 @@ async fn run_task_pipeline(
     result.agent_patch = agent_patch;
 
     Ok(result)
+}
+
+// ── SSH helper: run a command on a remote host via ssh ──
+
+async fn ssh_exec(
+    host: &str,
+    port: u16,
+    user: &str,
+    cmd: &str,
+    timeout: Duration,
+) -> Result<(String, String, i32)> {
+    let ssh_target = format!("{}@{}", user, host);
+    run_cmd(
+        &[
+            "ssh",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "ConnectTimeout=10",
+            "-o", "LogLevel=ERROR",
+            "-p", &port.to_string(),
+            &ssh_target,
+            cmd,
+        ],
+        Path::new("/tmp"),
+        timeout,
+        None,
+    )
+    .await
+}
+
+/// Transfer a file to a remote host via scp.
+async fn scp_to(
+    host: &str,
+    port: u16,
+    user: &str,
+    local_path: &Path,
+    remote_path: &str,
+    timeout: Duration,
+) -> Result<()> {
+    let dest = format!("{}@{}:{}", user, host, remote_path);
+    let (_, stderr, exit) = run_cmd(
+        &[
+            "scp",
+            "-o", "StrictHostKeyChecking=no",
+            "-o", "UserKnownHostsFile=/dev/null",
+            "-o", "LogLevel=ERROR",
+            "-P", &port.to_string(),
+            &local_path.to_string_lossy(),
+            &dest,
+        ],
+        Path::new("/tmp"),
+        timeout,
+        None,
+    )
+    .await?;
+    if exit != 0 {
+        anyhow::bail!("scp failed (exit {}): {}", exit, &stderr[..stderr.len().min(300)]);
+    }
+    Ok(())
+}
+
+// ── Run a full task pipeline inside a Basilica container ──
+
+#[allow(clippy::too_many_arguments)]
+async fn run_task_on_basilica(
+    config: &Config,
+    task: &SweForgeTask,
+    agent_code: &str,
+    _agent_language: &str,
+    agent_archive: Option<&[u8]>,
+    agent_env: &HashMap<String, String>,
+    cancel_rx: &tokio::sync::watch::Receiver<bool>,
+    client: &crate::basilica::client::BasilicaClient,
+) -> Result<TaskResult> {
+    let mut result = TaskResult::new(task.id.clone());
+    let timeout = Duration::from_secs(config.clone_timeout_secs);
+
+    if *cancel_rx.borrow() {
+        anyhow::bail!("Cancelled");
+    }
+
+    // 1. Get SSH key (must already be registered)
+    info!("[{}] Provisioning Basilica container...", task.id);
+    result.status = TaskStatus::Queued;
+
+    let ssh_key = client.get_ssh_key().await?
+        .context("No SSH key registered with Basilica. Register one via POST /basilica/ssh-keys first.")?;
+
+    // 2. Provision CPU container
+    let container = client
+        .provision_cpu_container(&ssh_key.id, Some(4), Some(4))
+        .await
+        .context("Failed to provision Basilica container")?;
+
+    let host = container.ssh_host.as_deref()
+        .context("No SSH host in container info")?;
+    let port = container.ssh_port.unwrap_or(22);
+    let user = container.ssh_user.as_deref().unwrap_or("root");
+    let rental_id = container.rental_id.clone();
+
+    info!(
+        "[{}] Container ready: {} (ssh {}@{}:{})",
+        task.id, rental_id, user, host, port
+    );
+
+    // Run the task pipeline in the container, always clean up after
+    let run = async {
+        let work_dir = format!("/tmp/task-{}", task.id.replace('/', "__"));
+
+        // 3. Setup workspace on the container
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        result.status = TaskStatus::CloningRepo;
+        info!("[{}] Cloning repo on container...", task.id);
+
+        let repo_url = &task.workspace.repo;
+        let clone_cmd = if let Some(ref commit) = task.workspace.base_commit {
+            format!(
+                "mkdir -p {work_dir} && git clone --depth 50 --single-branch {repo_url} {work_dir}/repo && cd {work_dir}/repo && git checkout {commit}",
+            )
+        } else {
+            format!("mkdir -p {work_dir} && git clone --depth 50 --single-branch {repo_url} {work_dir}/repo")
+        };
+
+        let (_, stderr, exit) = ssh_exec(host, port, user, &clone_cmd, timeout).await?;
+        if exit != 0 {
+            anyhow::bail!("Clone failed on container (exit {}): {}", exit, &stderr[..stderr.len().min(500)]);
+        }
+
+        // 4. Install dependencies
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        result.status = TaskStatus::InstallingDeps;
+        if let Some(ref install_cmds) = task.workspace.install {
+            for cmd in install_cmds {
+                let effective_cmd = filter_install_command(cmd);
+                if effective_cmd.is_empty() {
+                    continue;
+                }
+                info!("[{}] Installing on container: {}", task.id, &effective_cmd[..effective_cmd.len().min(120)]);
+                let install_cmd = format!("cd {work_dir}/repo && {effective_cmd}");
+                let (_, stderr, exit) = ssh_exec(host, port, user, &install_cmd, timeout).await?;
+                if exit != 0 {
+                    warn!(
+                        "[{}] Install failed on container (exit {}): {}",
+                        task.id, exit, &stderr[..stderr.len().min(500)]
+                    );
+                }
+            }
+        }
+
+        // 5. Upload and run agent
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        result.status = TaskStatus::RunningAgent;
+        info!("[{}] Running agent on container...", task.id);
+
+        // Write prompt
+        let escaped_prompt = task.prompt.replace('\'', "'\\''");
+        ssh_exec(
+            host, port, user,
+            &format!("cat > {work_dir}/repo/_task_prompt.md << 'TASKPROMPTEOF'\n{}\nTASKPROMPTEOF", task.prompt),
+            timeout,
+        ).await?;
+
+        let agent_output = if let Some(archive_bytes) = agent_archive {
+            // Upload agent archive via scp
+            let local_tmp = std::env::temp_dir().join(format!("agent-{}.zip", uuid::Uuid::new_v4()));
+            tokio::fs::write(&local_tmp, archive_bytes).await?;
+            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/agent.zip"), timeout).await?;
+            let _ = tokio::fs::remove_file(&local_tmp).await;
+
+            // Extract and run on remote
+            let mut env_exports = String::new();
+            env_exports.push_str(&format!("export REPO_DIR={work_dir}/repo && "));
+            env_exports.push_str(&format!("export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "));
+            for (k, v) in agent_env {
+                let escaped_v = v.replace('\'', "'\\''");
+                env_exports.push_str(&format!("export {}='{}' && ", k, escaped_v));
+            }
+
+            let run_agent_cmd = format!(
+                "cd {work_dir} && unzip -qo agent.zip -d _agent && \
+                 cd {work_dir}/repo && \
+                 AGENT_DIR=$(find {work_dir}/_agent -name agent_code -type d | head -1) && \
+                 if [ -f \"$AGENT_DIR/requirements.txt\" ]; then pip install --break-system-packages -q -r \"$AGENT_DIR/requirements.txt\" 2>&1 || true; fi && \
+                 {env_exports} \
+                 python3 \"$AGENT_DIR/agent.py\" --instruction '{escaped_prompt}' 2>&1"
+            );
+
+            let (stdout, stderr, exit) = ssh_exec(
+                host, port, user, &run_agent_cmd,
+                Duration::from_secs(config.agent_timeout_secs),
+            ).await?;
+
+            if exit != 0 {
+                warn!("[{}] Agent exited with code {} on container", task.id, exit);
+            }
+            format!("{}\n{}", stdout, stderr)
+        } else {
+            // Legacy single-file agent
+            let local_tmp = std::env::temp_dir().join(format!("agent-{}.py", uuid::Uuid::new_v4()));
+            tokio::fs::write(&local_tmp, agent_code).await?;
+            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/repo/_agent_code.py"), timeout).await?;
+            let _ = tokio::fs::remove_file(&local_tmp).await;
+
+            let mut env_exports = String::new();
+            env_exports.push_str(&format!("export REPO_DIR={work_dir}/repo && "));
+            env_exports.push_str(&format!("export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "));
+            for (k, v) in agent_env {
+                let escaped_v = v.replace('\'', "'\\''");
+                env_exports.push_str(&format!("export {}='{}' && ", k, escaped_v));
+            }
+
+            let (stdout, stderr, exit) = ssh_exec(
+                host, port, user,
+                &format!("cd {work_dir}/repo && {env_exports} python3 _agent_code.py --instruction '{escaped_prompt}' 2>&1"),
+                Duration::from_secs(config.agent_timeout_secs),
+            ).await?;
+
+            if exit != 0 {
+                warn!("[{}] Agent exited with code {} on container", task.id, exit);
+            }
+            format!("{}\n{}", stdout, stderr)
+        };
+
+        // 6. Capture agent patch
+        let agent_patch = match ssh_exec(host, port, user, &format!("cd {work_dir}/repo && git diff"), Duration::from_secs(30)).await {
+            Ok((stdout, _, _)) => stdout,
+            Err(_) => String::new(),
+        };
+
+        // 7. Upload test files and run tests
+        if *cancel_rx.borrow() {
+            anyhow::bail!("Cancelled");
+        }
+
+        result.status = TaskStatus::RunningTests;
+        info!("[{}] Running tests on container...", task.id);
+
+        // Write test source files
+        for (name, content) in &task.test_source_files {
+            let escaped_content = content.replace('\'', "'\\''");
+            let remote_path = format!("{work_dir}/repo/{name}");
+            ssh_exec(
+                host, port, user,
+                &format!("mkdir -p $(dirname '{remote_path}') && cat > '{remote_path}' << 'TESTFILEEOF'\n{content}\nTESTFILEEOF"),
+                timeout,
+            ).await?;
+        }
+
+        // Write and run test scripts
+        let mut test_results: Vec<TaskTestResult> = Vec::new();
+        for (name, content) in &task.test_scripts {
+            let remote_script = format!("{work_dir}/repo/{name}");
+            let escaped = content.replace('\'', "'\\''");
+            ssh_exec(
+                host, port, user,
+                &format!("mkdir -p $(dirname '{remote_script}') && cat > '{remote_script}' << 'SCRIPTEOF'\n{content}\nSCRIPTEOF\nchmod +x '{remote_script}'"),
+                timeout,
+            ).await?;
+
+            let (stdout, stderr, exit) = ssh_exec(
+                host, port, user,
+                &format!("cd {work_dir}/repo && bash '{remote_script}' 2>&1"),
+                Duration::from_secs(config.test_timeout_secs),
+            ).await.unwrap_or_else(|e| (String::new(), format!("Error: {:#}", e), -1));
+
+            test_results.push(TaskTestResult {
+                name: name.clone(),
+                passed: exit == 0,
+                output: format!("{}\n{}", stdout, stderr),
+                exit_code: exit,
+            });
+        }
+
+        let all_passed = test_results.iter().all(|t| t.passed);
+        let test_output_combined = test_results
+            .iter()
+            .map(|t| format!(
+                "=== {} (exit {}) ===\n{}\n{}",
+                t.name, t.exit_code, t.output,
+                if t.passed { "PASS" } else { "FAIL" }
+            ))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        result.status = if all_passed { TaskStatus::Completed } else { TaskStatus::Failed };
+        result.passed = Some(all_passed);
+        result.reward = if all_passed { 1.0 } else { 0.0 };
+        result.test_results = test_results;
+        result.test_output = test_output_combined;
+        result.agent_output = agent_output;
+        result.agent_patch = agent_patch;
+
+        Ok(result)
+    };
+
+    let task_result = run.await;
+
+    // Always clean up the container
+    info!("[{}] Destroying container {}...", task.id, rental_id);
+    if let Err(e) = client.stop_rental(&rental_id).await {
+        warn!("[{}] Failed to stop container {}: {}", task.id, rental_id, e);
+    }
+
+    task_result
 }
 
 async fn clone_repo(repo_url: &str, dest: &Path, timeout_secs: u64) -> Result<()> {
