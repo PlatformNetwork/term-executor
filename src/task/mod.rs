@@ -352,6 +352,15 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
         }
     }
 
+    // Prepend runtime install commands derived from install_config version fields
+    if let Some(ref ic) = workspace.install_config {
+        let runtime_cmd = runtime_install_command(ic);
+        if !runtime_cmd.is_empty() {
+            let installs = workspace.install.get_or_insert_with(Vec::new);
+            installs.insert(0, runtime_cmd);
+        }
+    }
+
     Ok(SweForgeTask {
         id,
         workspace,
@@ -360,6 +369,64 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
         test_source_files,
         swe_forge_fields: None,
     })
+}
+
+/// Generate shell commands to install the correct language runtime on a fresh
+/// Ubuntu container. Reads version fields from install_config (go, node, rust,
+/// java) and returns a single shell string that installs the runtime via
+/// official binaries/version managers instead of apt packages.
+/// Generate a shell command to install the correct language runtime on a fresh
+/// Ubuntu container. Reads version fields from install_config and downloads
+/// the runtime via official binaries. The command is prepended to the install
+/// list so the runtime is available for subsequent install/test commands.
+///
+/// PATH modifications are persisted via /etc/profile.d so they survive across
+/// separate SSH invocations.
+fn runtime_install_command(install_config: &std::collections::BTreeMap<String, String>) -> String {
+    let mut cmds: Vec<String> = Vec::new();
+
+    if install_config.contains_key("go") {
+        // Install Go by reading the required version from go.mod at runtime.
+        // Falls back to install_config version, then 1.23.0.
+        // This handles existing tasks whose install_config has a stale version.
+        let fallback = install_config.get("go").map(|v| {
+            let v = if v.starts_with("1.") { v.as_str() } else { "1.23" };
+            if v.matches('.').count() == 1 { format!("{v}.0") } else { v.to_string() }
+        }).unwrap_or_else(|| "1.23.0".to_string());
+
+        cmds.push(format!(
+            "GO_VER=$(grep -oP '^go\\s+\\K[0-9.]+' go.mod 2>/dev/null || echo '{fallback}'); \
+             GO_VER=$(echo $GO_VER | awk -F. '{{if(NF==2) print $0\".0\"; else print $0}}'); \
+             sudo rm -rf /usr/local/go && \
+             curl -fsSL https://go.dev/dl/go${{GO_VER}}.linux-amd64.tar.gz | sudo tar -C /usr/local -xzf - && \
+             echo 'export PATH=/usr/local/go/bin:$PATH' | sudo tee /etc/profile.d/go.sh > /dev/null"
+        ));
+    }
+
+    if let Some(node_ver) = install_config.get("node") {
+        let v = node_ver.trim();
+        cmds.push(format!(
+            "curl -fsSL https://deb.nodesource.com/setup_{v}.x | sudo bash - && \
+             sudo apt-get install -y nodejs"
+        ));
+    }
+
+    if install_config.contains_key("rust") {
+        cmds.push(
+            "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+             echo 'export PATH=$HOME/.cargo/bin:$PATH' | sudo tee /etc/profile.d/rust.sh > /dev/null".to_string()
+        );
+    }
+
+    if let Some(java_ver) = install_config.get("java") {
+        let v = java_ver.trim();
+        cmds.push(format!(
+            "sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-{v}-jdk 2>/dev/null || \
+             sudo apt-get install -y -qq default-jdk"
+        ));
+    }
+
+    cmds.join(" && ")
 }
 
 fn load_tests_recursive(

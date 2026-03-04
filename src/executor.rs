@@ -591,6 +591,11 @@ async fn ssh_exec(
 ) -> Result<(String, String, i32)> {
     let ssh_target = format!("{}@{}", user, host);
     let port_str = port.to_string();
+    // Source /etc/profile.d scripts so runtime installs (Go, Node, Rust) are on PATH
+    let wrapped_cmd = format!(
+        "for f in /etc/profile.d/*.sh; do [ -r \"$f\" ] && . \"$f\"; done 2>/dev/null; {}",
+        cmd
+    );
     let mut args: Vec<&str> = vec![
         "ssh",
         "-o", "StrictHostKeyChecking=no",
@@ -601,7 +606,7 @@ async fn ssh_exec(
     if let Some(key) = ssh_key {
         args.extend_from_slice(&["-i", key]);
     }
-    args.extend_from_slice(&["-p", &port_str, &ssh_target, cmd]);
+    args.extend_from_slice(&["-p", &port_str, &ssh_target, &wrapped_cmd]);
     run_cmd(&args, Path::new("/tmp"), timeout, None).await
 }
 
