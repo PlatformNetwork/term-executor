@@ -160,6 +160,7 @@ fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
         difficulty_score: None,
         patch: Some(entry.patch.clone()),
         prompt: Some(entry.problem_statement.clone()),
+        runtime_install: None,
     };
 
     let test_script = build_test_script(&entry.test_patch, entry.fail_to_pass.as_deref());

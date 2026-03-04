@@ -83,17 +83,53 @@ fn filter_install_command(cmd: &str) -> String {
         "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ",
     ];
 
+    // Runtime packages that are already installed by runtime_install_command.
+    // Strip these apt-get install commands to avoid "held broken packages" conflicts.
+    let redundant_runtime_packages = [
+        "golang", "nodejs", "npm", "node", "default-jdk", "openjdk",
+    ];
+
     let parts: Vec<&str> = cmd.split("&&").collect();
     let processed: Vec<String> = parts
         .iter()
-        .map(|p| {
+        .filter_map(|p| {
             let trimmed = p.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let lower = trimmed.to_lowercase();
+            // Skip corepack enable (yarn/pnpm already installed globally by runtime)
+            if lower.starts_with("corepack enable") || lower.starts_with("sudo corepack") {
+                return None;
+            }
+            // Skip redundant apt-get install of runtimes already handled
+            if (lower.contains("apt-get install") || lower.contains("apt install"))
+                && redundant_runtime_packages.iter().any(|pkg| lower.contains(pkg))
+                // Keep if it also installs other packages (heuristic: >3 packages)
+                && !lower.contains("build-essential")
+            {
+                // Check if this ONLY installs runtime packages
+                let non_runtime = trimmed.split_whitespace()
+                    .filter(|w| !w.starts_with('-') && !redundant_runtime_packages.iter().any(|pkg| w.to_lowercase().contains(pkg)))
+                    .filter(|w| !["sudo", "apt-get", "apt", "install", "update", "&&", "-y", "-qq"].contains(w))
+                    .count();
+                if non_runtime == 0 {
+                    return None; // pure runtime install, skip it
+                }
+            }
+            // Also skip apt-get update if it's standalone (already done by runtime install)
+            if lower == "sudo apt-get update" || lower == "apt-get update"
+                || lower == "sudo apt-get update -qq" || lower == "apt-get update -qq"
+            {
+                return None;
+            }
+
             if trimmed.starts_with("sudo ") {
-                fix_pip_pep668(trimmed)
+                Some(fix_pip_pep668(trimmed))
             } else if root_prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
-                fix_pip_pep668(&format!("sudo {}", trimmed))
+                Some(fix_pip_pep668(&format!("sudo {}", trimmed)))
             } else {
-                fix_pip_pep668(trimmed)
+                Some(fix_pip_pep668(trimmed))
             }
         })
         .collect();
@@ -717,6 +753,34 @@ async fn run_task_on_basilica(
         }
 
         result.status = TaskStatus::InstallingDeps;
+
+        // Install base build tools + ensure python/pip/pytest are on PATH
+        let base_tools = format!(
+            "sudo apt-get update -qq && \
+             sudo apt-get install -y -qq git curl build-essential python3 python3-pip python3-venv unzip > /dev/null 2>&1 && \
+             sudo ln -sf $(command -v python3) /usr/local/bin/python 2>/dev/null; \
+             sudo ln -sf $(command -v pip3) /usr/local/bin/pip 2>/dev/null; \
+             sudo python3 -m pip install --break-system-packages pytest 2>/dev/null; true"
+        );
+        let (_, _, exit) = ssh_exec(host, port, user, &base_tools, timeout, ssh_key).await?;
+        if exit != 0 {
+            warn!("[{}] Base tools install failed (exit {})", task.id, exit);
+        }
+
+        // Run runtime install (not filtered - installs Go/Node/Rust/Java from official sources)
+        if let Some(ref runtime_cmd) = task.workspace.runtime_install {
+            info!("[{}] Installing runtime on container: {}", task.id, &runtime_cmd[..runtime_cmd.len().min(120)]);
+            let cmd = format!("cd {work_dir}/repo && {runtime_cmd}");
+            let (_, stderr, exit) = ssh_exec(host, port, user, &cmd, timeout, ssh_key).await?;
+            if exit != 0 {
+                warn!(
+                    "[{}] Runtime install failed on container (exit {}): {}",
+                    task.id, exit, &stderr[..stderr.len().min(500)]
+                );
+            }
+        }
+
+        // Run project install commands (filtered for sudo/pip)
         if let Some(ref install_cmds) = task.workspace.install {
             for cmd in install_cmds {
                 let effective_cmd = filter_install_command(cmd);

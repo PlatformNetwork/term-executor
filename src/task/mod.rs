@@ -40,6 +40,10 @@ pub struct WorkspaceConfig {
     pub patch: Option<String>,
     #[serde(default)]
     pub prompt: Option<String>,
+    /// Runtime install command generated from install_config version fields.
+    /// Executed before project install commands, without filter_install_command.
+    #[serde(skip)]
+    pub runtime_install: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -352,12 +356,12 @@ pub fn parse_task(task_dir: &Path) -> Result<SweForgeTask> {
         }
     }
 
-    // Prepend runtime install commands derived from install_config version fields
+    // Generate runtime install command from install_config version fields.
+    // Stored separately so executor can run it without filter_install_command.
     if let Some(ref ic) = workspace.install_config {
         let runtime_cmd = runtime_install_command(ic);
         if !runtime_cmd.is_empty() {
-            let installs = workspace.install.get_or_insert_with(Vec::new);
-            installs.insert(0, runtime_cmd);
+            workspace.runtime_install = Some(runtime_cmd);
         }
     }
 
@@ -407,7 +411,9 @@ fn runtime_install_command(install_config: &std::collections::BTreeMap<String, S
         let v = node_ver.trim();
         cmds.push(format!(
             "curl -fsSL https://deb.nodesource.com/setup_{v}.x | sudo bash - && \
-             sudo apt-get install -y nodejs"
+             sudo apt-get install -y nodejs && \
+             sudo corepack enable 2>/dev/null; \
+             sudo npm install -g yarn pnpm 2>/dev/null; true"
         ));
     }
 
@@ -421,8 +427,9 @@ fn runtime_install_command(install_config: &std::collections::BTreeMap<String, S
     if let Some(java_ver) = install_config.get("java") {
         let v = java_ver.trim();
         cmds.push(format!(
-            "sudo apt-get update -qq && sudo apt-get install -y -qq openjdk-{v}-jdk 2>/dev/null || \
-             sudo apt-get install -y -qq default-jdk"
+            "sudo apt-get update -qq && \
+             sudo apt-get install -y -qq openjdk-{v}-jdk maven 2>/dev/null || \
+             sudo apt-get install -y -qq default-jdk maven 2>/dev/null; true"
         ));
     }
 
