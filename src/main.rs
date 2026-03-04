@@ -1,4 +1,5 @@
 mod auth;
+mod basilica;
 mod cleanup;
 mod config;
 mod consensus;
@@ -60,6 +61,19 @@ async fn main() {
     }
     let consensus_manager = consensus::ConsensusManager::new(config.max_pending_consensus);
 
+    let basilica_client = config.basilica_api_token.as_ref().and_then(|token| {
+        match basilica::client::BasilicaClient::new(token) {
+            Ok(c) => {
+                info!("Basilica API client initialized");
+                Some(Arc::new(c))
+            }
+            Err(e) => {
+                error!("Failed to initialize Basilica client: {}", e);
+                None
+            }
+        }
+    });
+
     let state = Arc::new(handlers::AppState {
         config: config.clone(),
         sessions: sessions.clone(),
@@ -71,6 +85,7 @@ async fn main() {
         consensus_manager: consensus_manager.clone(),
         agent_archive: Arc::new(tokio::sync::RwLock::new(None)),
         agent_env: Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new())),
+        basilica_client,
     });
 
     let app = handlers::router(state);

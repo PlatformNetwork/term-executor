@@ -33,6 +33,7 @@ pub struct Config {
     pub max_pending_consensus: usize,
     pub sudo_password: Option<String>,
     pub trusted_validators: Vec<String>,
+    pub basilica_api_token: Option<String>,
 }
 
 impl Config {
@@ -77,6 +78,9 @@ impl Config {
                 DEFAULT_MAX_PENDING_CONSENSUS,
             ),
             sudo_password: std::env::var("SUDO_PASSWORD")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            basilica_api_token: std::env::var("BASILICA_API_TOKEN")
                 .ok()
                 .filter(|s| !s.is_empty()),
             trusted_validators: std::env::var("TRUSTED_VALIDATORS")
