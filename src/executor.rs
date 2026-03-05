@@ -735,11 +735,12 @@ async fn run_task_on_basilica(
 
         let repo_url = &task.workspace.repo;
         let clone_cmd = if let Some(ref commit) = task.workspace.base_commit {
+            // Full clone needed to reach arbitrary commits
             format!(
-                "mkdir -p {work_dir} && git clone --depth 50 --single-branch {repo_url} {work_dir}/repo && cd {work_dir}/repo && git checkout {commit}",
+                "mkdir -p {work_dir} && git clone {repo_url} {work_dir}/repo && cd {work_dir}/repo && git checkout {commit}",
             )
         } else {
-            format!("mkdir -p {work_dir} && git clone --depth 50 --single-branch {repo_url} {work_dir}/repo")
+            format!("mkdir -p {work_dir} && git clone --depth 1 --single-branch {repo_url} {work_dir}/repo")
         };
 
         let (_, stderr, exit) = ssh_exec(host, port, user, &clone_cmd, timeout, ssh_key).await?;
@@ -758,9 +759,10 @@ async fn run_task_on_basilica(
         let base_tools = format!(
             "sudo apt-get update -qq && \
              sudo apt-get install -y -qq git curl build-essential python3 python3-pip python3-venv unzip > /dev/null 2>&1 && \
-             sudo ln -sf $(command -v python3) /usr/local/bin/python 2>/dev/null; \
-             sudo ln -sf $(command -v pip3) /usr/local/bin/pip 2>/dev/null; \
-             sudo python3 -m pip install --break-system-packages pytest 2>/dev/null; true"
+             sudo ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null; \
+             sudo ln -sf /usr/bin/pip3 /usr/local/bin/pip 2>/dev/null; \
+             sudo python3 -m pip install --break-system-packages pytest > /dev/null 2>&1; \
+             sudo ln -sf /usr/local/bin/pytest /usr/bin/pytest 2>/dev/null; true"
         );
         let (_, _, exit) = ssh_exec(host, port, user, &base_tools, timeout, ssh_key).await?;
         if exit != 0 {
