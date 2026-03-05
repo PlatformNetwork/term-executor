@@ -138,12 +138,16 @@ fn filter_install_command(cmd: &str) -> String {
 }
 
 fn fix_pip_pep668(cmd: &str) -> String {
+    // Try --break-system-packages first (pip 23+), fall back to plain pip (pip 22)
     if (cmd.contains("pip install") || cmd.contains("pip3 install"))
         && !cmd.contains("--break-system-packages")
         && !cmd.contains("venv")
     {
-        cmd.replace("pip install", "pip install --break-system-packages")
-            .replace("pip3 install", "pip3 install --break-system-packages")
+        // Wrap with fallback: try with flag first, if it fails (old pip), retry without
+        let with_flag = cmd
+            .replace("pip install", "pip install --break-system-packages")
+            .replace("pip3 install", "pip3 install --break-system-packages");
+        format!("({} 2>&1 || {})", with_flag, cmd)
     } else {
         cmd.to_string()
     }
@@ -761,8 +765,8 @@ async fn run_task_on_basilica(
              sudo apt-get install -y -qq git curl build-essential python3 python3-pip python3-venv unzip > /dev/null 2>&1 && \
              sudo ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null; \
              sudo ln -sf /usr/bin/pip3 /usr/local/bin/pip 2>/dev/null; \
-             sudo python3 -m pip install --break-system-packages pytest > /dev/null 2>&1; \
-             sudo ln -sf /usr/local/bin/pytest /usr/bin/pytest 2>/dev/null; true"
+             sudo pip3 install pytest > /dev/null 2>&1 || sudo pip3 install --break-system-packages pytest > /dev/null 2>&1; \
+             hash -r 2>/dev/null; true"
         );
         let (_, _, exit) = ssh_exec(host, port, user, &base_tools, timeout, ssh_key).await?;
         if exit != 0 {
