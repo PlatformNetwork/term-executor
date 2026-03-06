@@ -147,11 +147,17 @@ fn convert_dataset_entry_to_task(entry: &DatasetEntry) -> Result<SweForgeTask> {
         .as_deref()
         .and_then(|s| serde_json::from_str(s).ok());
 
+    let install = entry
+        .install
+        .as_ref()
+        .filter(|s| !s.is_empty())
+        .map(|s| vec![s.clone()]);
+
     let workspace = WorkspaceConfig {
         repo: repo_url,
         version: entry.version.clone().unwrap_or_default(),
         base_commit: Some(entry.base_commit.clone()),
-        install: None,
+        install,
         language: Some(language),
         fail_to_pass: f2p,
         pass_to_pass: p2p,
@@ -237,6 +243,10 @@ mod tests {
         assert_eq!(task.workspace.repo, "https://github.com/django/django");
         assert_eq!(task.workspace.base_commit.as_deref(), Some("abc123def456"));
         assert!(task.swe_forge_fields.is_some());
+        assert_eq!(
+            task.workspace.install.as_deref(),
+            Some(vec!["pip install -e .".to_string()].as_slice())
+        );
 
         let fields = task.swe_forge_fields.as_ref().unwrap();
         assert_eq!(fields.instance_id, "django__django-12345");
@@ -373,6 +383,7 @@ mod tests {
             fail_to_pass: Some(r#"["tests/test_orm.py::test_query"]"#.to_string()),
             pass_to_pass: None,
             environment_setup_commit: None,
+            install: Some("pip install -e .".to_string()),
             language: Some("python".to_string()),
             difficulty: Some("medium".to_string()),
             difficulty_score: Some(2),

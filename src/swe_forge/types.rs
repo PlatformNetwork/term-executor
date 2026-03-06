@@ -30,6 +30,8 @@ pub struct DatasetEntry {
     #[serde(default)]
     pub environment_setup_commit: Option<String>,
     #[serde(default)]
+    pub install: Option<String>,
+    #[serde(default)]
     pub language: Option<String>,
     #[serde(default)]
     pub difficulty: Option<String>,
@@ -59,7 +61,7 @@ pub struct DatasetConfig {
 }
 
 fn default_split() -> String {
-    "test".to_string()
+    "train".to_string()
 }
 
 fn default_limit() -> usize {
@@ -97,7 +99,7 @@ mod tests {
     fn test_dataset_config_default() {
         let config = DatasetConfig::default();
         assert_eq!(config.dataset_id, "CortexLM/swe-forge");
-        assert_eq!(config.split, "test");
+        assert_eq!(config.split, "train");
         assert_eq!(config.limit, 100);
         assert_eq!(config.offset, 0);
     }

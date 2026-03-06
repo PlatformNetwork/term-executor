@@ -13,7 +13,7 @@ FROM debian:bookworm-slim
 
 # Pre-install all common runtimes and tools at build time (as root)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git curl wget unzip libssl3 libssl-dev pkg-config sudo \
+    ca-certificates git curl wget unzip libssl3 libssl-dev pkg-config sudo openssh-client \
     python3 python3-pip python3-venv python3-dev \
     build-essential gcc g++ make cmake autoconf automake libtool \
     default-jdk maven gradle \
