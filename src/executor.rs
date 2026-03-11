@@ -546,6 +546,19 @@ async fn run_task_pipeline(
         }
     }
 
+    // Ensure node_modules/.bin binaries are executable (fixes "Permission denied" with vitest etc.)
+    let node_bin_dir = repo_dir.join("node_modules/.bin");
+    if node_bin_dir.exists() {
+        debug!("[{}] Fixing node_modules/.bin permissions", task.id);
+        let _ = run_shell(
+            "chmod -R +x node_modules/.bin/ 2>/dev/null || true",
+            &repo_dir,
+            Duration::from_secs(30),
+            None,
+        )
+        .await;
+    }
+
     if *cancel_rx.borrow() {
         anyhow::bail!("Cancelled");
     }
@@ -1094,13 +1107,29 @@ async fn run_agent(
             }
         }
 
+        // Log extracted agent directory structure for debugging
+        debug!(
+            "Agent directory resolved to: {}",
+            agent_dir.display()
+        );
+        if let Ok(mut entries) = tokio::fs::read_dir(&agent_dir).await {
+            let mut files = Vec::new();
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                files.push(entry.file_name().to_string_lossy().to_string());
+            }
+            debug!("Agent directory contents: {:?}", files);
+        }
+
         // Determine entry point (use absolute path so we can run from repo_dir)
         let entry_file = if agent_dir.join("agent.py").exists() {
             agent_dir.join("agent.py")
         } else if agent_dir.join("main.py").exists() {
             agent_dir.join("main.py")
         } else {
-            agent_dir.join("agent.py")
+            anyhow::bail!(
+                "Agent code not found: neither agent.py nor main.py exists in {}",
+                agent_dir.display()
+            );
         };
 
         let mut argv = vec![

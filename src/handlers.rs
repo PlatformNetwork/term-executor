@@ -1066,20 +1066,28 @@ async fn submit_tasks(
         )
     })?;
 
-    if state.validator_whitelist.validator_count() > 0 {
-        if let Err(e) = auth::verify_request(
-            &auth_headers,
-            &state.nonce_store,
-            &state.validator_whitelist,
-        ) {
-            return Err((
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({
-                    "error": e.code(),
-                    "message": e.message(),
-                })),
-            ));
-        }
+    if state.validator_whitelist.validator_count() == 0 {
+        return Err((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "error": "whitelist_not_ready",
+                "message": "Validator whitelist not yet initialized. Please retry shortly."
+            })),
+        ));
+    }
+
+    if let Err(e) = auth::verify_request(
+        &auth_headers,
+        &state.nonce_store,
+        &state.validator_whitelist,
+    ) {
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": e.code(),
+                "message": e.message(),
+            })),
+        ));
     }
 
     // Parse multipart: expect "task_ids" (JSON) and "archive" (file)

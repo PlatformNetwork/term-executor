@@ -54,7 +54,7 @@ RUN useradd -m -s /bin/bash agent \
     && chown -R agent:agent /home/agent
 
 COPY --from=builder /build/target/release/term-executor /usr/local/bin/
-RUN mkdir -p /tmp/sessions && chown agent:agent /tmp/sessions
+RUN mkdir -p /home/agent/sessions && chown agent:agent /home/agent/sessions
 
 USER agent
 ENV HOME=/home/agent
