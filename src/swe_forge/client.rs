@@ -8,6 +8,8 @@ const HF_DATASET_VIEWER_BASE: &str = "https://datasets-server.huggingface.co/row
 const HF_REPO_BASE: &str = "https://huggingface.co";
 const DEFAULT_TIMEOUT_SECS: u64 = 30;
 const MAX_PAGE_SIZE: usize = 100;
+/// Minimum number of task directories to consider the snapshot cache valid.
+const SNAPSHOT_MIN_DIRS: usize = 5;
 
 pub struct HuggingFaceClient {
     client: reqwest::Client,
@@ -136,6 +138,12 @@ impl HuggingFaceClient {
                 tokio::fs::create_dir_all(parent).await?;
             }
 
+            // Skip files that already exist with non-zero size (cached from previous run)
+            if local_path.exists() && local_path.metadata().map(|m| m.len() > 0).unwrap_or(false) {
+                debug!("Skipping cached file: {}", local_path.display());
+                continue;
+            }
+
             let download_url = format!(
                 "{}/datasets/{}/resolve/main/{}",
                 HF_REPO_BASE, dataset_id, file_path
@@ -164,6 +172,84 @@ impl HuggingFaceClient {
             instance_id,
             dest_dir.display()
         );
+        Ok(())
+    }
+
+    /// Download the entire `tasks/` folder from the HF dataset repo using a
+    /// shallow `git clone --depth 1`. This replaces hundreds of individual
+    /// HTTP API requests with a single bulk git operation.
+    ///
+    /// After this call, task files live at `<cache_dir>/tasks/{org}/{repo-number}/`.
+    pub async fn snapshot_download_tasks(
+        &self,
+        dataset_id: &str,
+        cache_dir: &std::path::Path,
+    ) -> Result<()> {
+        let tasks_dir = cache_dir.join("tasks");
+
+        // Check if already cached (has enough task directories)
+        if tasks_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&tasks_dir).await?;
+            let mut count = 0usize;
+            while entries.next_entry().await?.is_some() {
+                count += 1;
+                if count >= SNAPSHOT_MIN_DIRS {
+                    info!(
+                        "HF tasks already cached at {:?} ({} top-level dirs)",
+                        tasks_dir, count
+                    );
+                    return Ok(());
+                }
+            }
+        }
+
+        info!(
+            "Downloading HF dataset via git clone --depth 1 to {:?}",
+            cache_dir
+        );
+
+        let repo_url = format!("https://huggingface.co/datasets/{}", dataset_id);
+
+        // Clean and recreate cache dir for a fresh clone
+        if cache_dir.exists() {
+            tokio::fs::remove_dir_all(cache_dir).await.ok();
+        }
+
+        // Shallow clone — the swe-forge dataset is small (~6 MB) so a full
+        // depth-1 clone is fast and avoids HF git server limitations with
+        // partial/sparse clones.
+        let output = tokio::process::Command::new("git")
+            .args(["clone", "--depth", "1"])
+            .arg(&repo_url)
+            .arg(cache_dir.as_os_str())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .output()
+            .await
+            .context("Failed to execute git clone")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("git clone failed (exit {}): {}", output.status, stderr);
+        }
+
+        // Verify the download
+        let mut count = 0usize;
+        if tasks_dir.exists() {
+            let mut entries = tokio::fs::read_dir(&tasks_dir).await?;
+            while entries.next_entry().await?.is_some() {
+                count += 1;
+            }
+        }
+        info!("Downloaded {} top-level task directories from HF", count);
+
+        if count == 0 {
+            anyhow::bail!(
+                "Snapshot download produced no task directories at {:?}",
+                tasks_dir
+            );
+        }
+
         Ok(())
     }
 

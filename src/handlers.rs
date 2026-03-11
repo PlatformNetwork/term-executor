@@ -1352,7 +1352,7 @@ async fn evaluate_with_stored_agent(
         })?
     };
 
-    // Download task files from HF repo (workspace.yaml, tests/*.sh, etc.)
+    // Download all task files from HF repo via snapshot (bulk git clone)
     let hf_client = crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1361,31 +1361,98 @@ async fn evaluate_with_stored_agent(
     })?;
 
     let dataset_id = "CortexLM/swe-forge";
-    let tasks_base = state.config.workspace_base.join("_hf_tasks");
-    let _ = tokio::fs::remove_dir_all(&tasks_base).await;
+    let snapshot_cache = state.config.workspace_base.join("_hf_dataset_cache");
 
+    // Bulk download the entire tasks/ folder (cached after first call)
+    hf_client
+        .snapshot_download_tasks(dataset_id, &snapshot_cache)
+        .await
+        .map_err(|e| {
+            tracing::warn!("Snapshot download failed: {}, falling back to per-task download", e);
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(serde_json::json!({"error": format!("Failed to download HF dataset: {}", e)})),
+            )
+        })?;
+
+    // Resolve tasks from the cached snapshot directory.
+    // HF stores tasks as tasks/{org}/{repo-number}/ (nested dirs matching the task_id).
+    let tasks_dir = snapshot_cache.join("tasks");
     let mut hf_tasks: Vec<crate::task::SweForgeTask> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
     for task_id in &task_ids {
-        let task_dir = tasks_base.join(task_id.replace('/', "__"));
-        match hf_client
-            .download_task_files(dataset_id, task_id, &task_dir)
-            .await
-        {
-            Ok(()) => match crate::task::parse_task(&task_dir) {
-                Ok(mut task) => {
-                    task.id = task_id.clone();
-                    hf_tasks.push(task);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to parse task {}: {}", task_id, e);
-                    errors.push(format!("{}: parse error: {}", task_id, e));
-                }
-            },
+        // task_id format: "org/repo-number" → HF path: tasks/org/repo-number/
+        let task_path = tasks_dir.join(task_id);
+
+        if !task_path.exists() || !task_path.is_dir() {
+            errors.push(format!("{}: not found in cached dataset", task_id));
+            continue;
+        }
+
+        match crate::task::parse_task(&task_path) {
+            Ok(mut task) => {
+                task.id = task_id.clone();
+                hf_tasks.push(task);
+            }
             Err(e) => {
-                tracing::warn!("Failed to download task {}: {}", task_id, e);
-                errors.push(format!("{}: download error: {}", task_id, e));
+                tracing::warn!("Failed to parse task {}: {}", task_id, e);
+                errors.push(format!("{}: parse error: {}", task_id, e));
+            }
+        }
+    }
+
+    // Fallback: if snapshot produced no matches, try per-task download for missing ones
+    if hf_tasks.is_empty() && !task_ids.is_empty() {
+        tracing::info!("No tasks found in snapshot cache, falling back to per-task download");
+        let hf_client = std::sync::Arc::new(
+            crate::swe_forge::client::HuggingFaceClient::new().map_err(|e| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("HF client error: {}", e)})),
+                )
+            })?,
+        );
+        let tasks_base = state.config.workspace_base.join("_hf_tasks");
+
+        use futures::stream::{self, StreamExt};
+
+        let download_results: Vec<_> = stream::iter(task_ids.clone().into_iter())
+            .map(|task_id| {
+                let hf = std::sync::Arc::clone(&hf_client);
+                let base = tasks_base.clone();
+                async move {
+                    let task_dir = base.join(task_id.replace('/', "__"));
+                    match hf
+                        .download_task_files(dataset_id, &task_id, &task_dir)
+                        .await
+                    {
+                        Ok(()) => match crate::task::parse_task(&task_dir) {
+                            Ok(mut task) => {
+                                task.id = task_id.clone();
+                                Ok(task)
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to parse task {}: {}", task_id, e);
+                                Err(format!("{}: parse error: {}", task_id, e))
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!("Failed to download task {}: {}", task_id, e);
+                            Err(format!("{}: download error: {}", task_id, e))
+                        }
+                    }
+                }
+            })
+            .buffer_unordered(5)
+            .collect()
+            .await;
+
+        errors.clear();
+        for result in download_results {
+            match result {
+                Ok(task) => hf_tasks.push(task),
+                Err(e) => errors.push(e),
             }
         }
     }
@@ -1444,6 +1511,7 @@ async fn evaluate_with_stored_agent(
             "batch_id": batch_id,
             "total_tasks": total_tasks,
             "matched_task_ids": task_ids,
+            "download_errors": errors,
         })),
     ))
 }
