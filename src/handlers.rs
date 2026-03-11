@@ -1420,7 +1420,7 @@ async fn evaluate_with_stored_agent(
 
         use futures::stream::{self, StreamExt};
 
-        let download_results: Vec<_> = stream::iter(task_ids.clone().into_iter())
+        let download_results: Vec<_> = stream::iter(task_ids.clone())
             .map(|task_id| {
                 let hf = std::sync::Arc::clone(&hf_client);
                 let base = tasks_base.clone();
