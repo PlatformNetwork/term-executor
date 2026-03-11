@@ -422,6 +422,7 @@ async fn run_batch(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_single_task(
     config: &Config,
     task: &SweForgeTask,
@@ -817,14 +818,12 @@ async fn run_task_on_basilica(
         result.status = TaskStatus::InstallingDeps;
 
         // Install base build tools + ensure python/pip/pytest are on PATH
-        let base_tools = format!(
-            "sudo apt-get update -qq && \
+        let base_tools = "sudo apt-get update -qq && \
              sudo apt-get install -y -qq git curl build-essential python3 python3-pip python3-venv unzip > /dev/null 2>&1 && \
              sudo ln -sf /usr/bin/python3 /usr/local/bin/python 2>/dev/null; \
              sudo ln -sf /usr/bin/pip3 /usr/local/bin/pip 2>/dev/null; \
              sudo pip3 install pytest > /dev/null 2>&1 || sudo pip3 install --break-system-packages pytest > /dev/null 2>&1; \
-             hash -r 2>/dev/null; true"
-        );
+             hash -r 2>/dev/null; true".to_string();
         let (_, _, exit) = ssh_exec(host, port, user, &base_tools, timeout, ssh_key).await?;
         if exit != 0 {
             warn!("[{}] Base tools install failed (exit {})", task.id, exit);
@@ -1012,7 +1011,7 @@ async fn run_task_on_basilica(
 
         // Write test source files
         for (name, content) in &task.test_source_files {
-            let escaped_content = content.replace('\'', "'\\''");
+            let _escaped_content = content.replace('\'', "'\\''");
             let remote_path = format!("{work_dir}/repo/{name}");
             ssh_exec(
                 host, port, user,
@@ -1025,7 +1024,7 @@ async fn run_task_on_basilica(
         let mut test_results: Vec<TaskTestResult> = Vec::new();
         for (name, content) in &task.test_scripts {
             let remote_script = format!("{work_dir}/repo/{name}");
-            let escaped = content.replace('\'', "'\\''");
+            let _escaped = content.replace('\'', "'\\''");
             ssh_exec(
                 host, port, user,
                 &format!("mkdir -p $(dirname '{remote_script}') && cat > '{remote_script}' << 'SCRIPTEOF'\n{content}\nSCRIPTEOF\nchmod +x '{remote_script}'"),

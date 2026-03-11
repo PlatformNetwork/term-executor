@@ -1,4 +1,5 @@
 mod auth;
+#[allow(dead_code)]
 mod basilica;
 mod cleanup;
 mod config;

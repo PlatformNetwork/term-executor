@@ -1460,6 +1460,7 @@ fn get_basilica_client(
 }
 
 #[derive(serde::Deserialize)]
+#[allow(dead_code)]
 struct CreateContainerRequest {
     #[serde(default = "default_container_type")]
     container_type: String,

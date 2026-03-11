@@ -325,8 +325,8 @@ impl BasilicaClient {
             .iter()
             .filter(|o| {
                 o.availability.unwrap_or(false)
-                    && min_cpu.map_or(true, |c| o.vcpu_count.unwrap_or(0) >= c)
-                    && min_memory_gb.map_or(true, |m| o.system_memory_gb.unwrap_or(0) >= m)
+                    && min_cpu.is_none_or(|c| o.vcpu_count.unwrap_or(0) >= c)
+                    && min_memory_gb.is_none_or(|m| o.system_memory_gb.unwrap_or(0) >= m)
             })
             .min_by(|a, b| {
                 let rate_a: f64 = a
