@@ -1368,7 +1368,10 @@ async fn evaluate_with_stored_agent(
         .snapshot_download_tasks(dataset_id, &snapshot_cache)
         .await
         .map_err(|e| {
-            tracing::warn!("Snapshot download failed: {}, falling back to per-task download", e);
+            tracing::warn!(
+                "Snapshot download failed: {}, falling back to per-task download",
+                e
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"error": format!("Failed to download HF dataset: {}", e)})),
