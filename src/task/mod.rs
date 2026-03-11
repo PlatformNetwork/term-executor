@@ -393,10 +393,21 @@ fn runtime_install_command(install_config: &std::collections::BTreeMap<String, S
         // Install Go by reading the required version from go.mod at runtime.
         // Falls back to install_config version, then 1.23.0.
         // This handles existing tasks whose install_config has a stale version.
-        let fallback = install_config.get("go").map(|v| {
-            let v = if v.starts_with("1.") { v.as_str() } else { "1.23" };
-            if v.matches('.').count() == 1 { format!("{v}.0") } else { v.to_string() }
-        }).unwrap_or_else(|| "1.23.0".to_string());
+        let fallback = install_config
+            .get("go")
+            .map(|v| {
+                let v = if v.starts_with("1.") {
+                    v.as_str()
+                } else {
+                    "1.23"
+                };
+                if v.matches('.').count() == 1 {
+                    format!("{v}.0")
+                } else {
+                    v.to_string()
+                }
+            })
+            .unwrap_or_else(|| "1.23.0".to_string());
 
         cmds.push(format!(
             "GO_VER=$(grep -oP '^go\\s+\\K[0-9.]+' go.mod 2>/dev/null || echo '{fallback}'); \

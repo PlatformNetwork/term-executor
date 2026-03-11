@@ -79,15 +79,11 @@ async fn run_shell(
 /// - Commands requiring root (apt-get, dpkg, etc.) are prefixed with sudo.
 /// - pip/pip3 install commands get --break-system-packages to bypass PEP 668.
 fn filter_install_command(cmd: &str) -> String {
-    let root_prefixes = [
-        "apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk ",
-    ];
+    let root_prefixes = ["apt-get", "apt ", "dpkg", "yum ", "dnf ", "pacman ", "apk "];
 
     // Runtime packages that are already installed by runtime_install_command.
     // Strip these apt-get install commands to avoid "held broken packages" conflicts.
-    let redundant_runtime_packages = [
-        "golang", "nodejs", "npm", "node", "default-jdk", "openjdk",
-    ];
+    let redundant_runtime_packages = ["golang", "nodejs", "npm", "node", "default-jdk", "openjdk"];
 
     let parts: Vec<&str> = cmd.split("&&").collect();
     let processed: Vec<String> = parts
@@ -109,24 +105,40 @@ fn filter_install_command(cmd: &str) -> String {
                 && !lower.contains("build-essential")
             {
                 // Check if this ONLY installs runtime packages
-                let non_runtime = trimmed.split_whitespace()
-                    .filter(|w| !w.starts_with('-') && !redundant_runtime_packages.iter().any(|pkg| w.to_lowercase().contains(pkg)))
-                    .filter(|w| !["sudo", "apt-get", "apt", "install", "update", "&&", "-y", "-qq"].contains(w))
+                let non_runtime = trimmed
+                    .split_whitespace()
+                    .filter(|w| {
+                        !w.starts_with('-')
+                            && !redundant_runtime_packages
+                                .iter()
+                                .any(|pkg| w.to_lowercase().contains(pkg))
+                    })
+                    .filter(|w| {
+                        ![
+                            "sudo", "apt-get", "apt", "install", "update", "&&", "-y", "-qq",
+                        ]
+                        .contains(w)
+                    })
                     .count();
                 if non_runtime == 0 {
                     return None; // pure runtime install, skip it
                 }
             }
             // Also skip apt-get update if it's standalone (already done by runtime install)
-            if lower == "sudo apt-get update" || lower == "apt-get update"
-                || lower == "sudo apt-get update -qq" || lower == "apt-get update -qq"
+            if lower == "sudo apt-get update"
+                || lower == "apt-get update"
+                || lower == "sudo apt-get update -qq"
+                || lower == "apt-get update -qq"
             {
                 return None;
             }
 
             if trimmed.starts_with("sudo ") {
                 Some(fix_pip_pep668(trimmed))
-            } else if root_prefixes.iter().any(|prefix| trimmed.starts_with(prefix)) {
+            } else if root_prefixes
+                .iter()
+                .any(|prefix| trimmed.starts_with(prefix))
+            {
                 Some(fix_pip_pep668(&format!("sudo {}", trimmed)))
             } else {
                 Some(fix_pip_pep668(trimmed))
@@ -160,7 +172,6 @@ fn needs_apt_lock(cmd: &str) -> bool {
         .iter()
         .any(|p| cmd.contains(p))
 }
-
 
 pub struct Executor {
     config: Arc<Config>,
@@ -200,8 +211,15 @@ impl Executor {
             let start = std::time::Instant::now();
             metrics.start_batch();
 
-            let result =
-                run_batch(&config, &batch, archive, concurrent_limit, agent_env, basilica).await;
+            let result = run_batch(
+                &config,
+                &batch,
+                archive,
+                concurrent_limit,
+                agent_env,
+                basilica,
+            )
+            .await;
             let duration_ms = start.elapsed().as_millis() as u64;
 
             let mut res = batch.result.lock().await;
@@ -419,9 +437,17 @@ async fn run_single_task(
 
     // If Basilica is configured, run the task in a dedicated container
     if let Some(client) = basilica {
-        let eval_result =
-            run_task_on_basilica(config, task, agent_code, agent_language, agent_archive, agent_env, &cancel_rx, client)
-                .await;
+        let eval_result = run_task_on_basilica(
+            config,
+            task,
+            agent_code,
+            agent_language,
+            agent_archive,
+            agent_env,
+            &cancel_rx,
+            client,
+        )
+        .await;
         let duration_ms = start.elapsed().as_millis() as u64;
         return match eval_result {
             Ok(mut r) => {
@@ -651,10 +677,14 @@ async fn ssh_exec(
     );
     let mut args: Vec<&str> = vec![
         "ssh",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "ConnectTimeout=10",
-        "-o", "LogLevel=ERROR",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "LogLevel=ERROR",
     ];
     if let Some(key) = ssh_key {
         args.extend_from_slice(&["-i", key]);
@@ -677,9 +707,12 @@ async fn scp_to(
     let local = local_path.to_string_lossy();
     let mut args: Vec<&str> = vec![
         "scp",
-        "-o", "StrictHostKeyChecking=no",
-        "-o", "UserKnownHostsFile=/dev/null",
-        "-o", "LogLevel=ERROR",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "LogLevel=ERROR",
     ];
     if let Some(key) = ssh_key {
         args.extend_from_slice(&["-i", key]);
@@ -687,7 +720,11 @@ async fn scp_to(
     args.extend_from_slice(&["-P", &port_str, &local, &dest]);
     let (_, stderr, exit) = run_cmd(&args, Path::new("/tmp"), timeout, None).await?;
     if exit != 0 {
-        anyhow::bail!("scp failed (exit {}): {}", exit, &stderr[..stderr.len().min(300)]);
+        anyhow::bail!(
+            "scp failed (exit {}): {}",
+            exit,
+            &stderr[..stderr.len().min(300)]
+        );
     }
     Ok(())
 }
@@ -716,8 +753,9 @@ async fn run_task_on_basilica(
     info!("[{}] Provisioning Basilica container...", task.id);
     result.status = TaskStatus::Queued;
 
-    let ssh_key = client.get_ssh_key().await?
-        .context("No SSH key registered with Basilica. Register one via POST /basilica/ssh-keys first.")?;
+    let ssh_key = client.get_ssh_key().await?.context(
+        "No SSH key registered with Basilica. Register one via POST /basilica/ssh-keys first.",
+    )?;
 
     // 2. Provision CPU container
     let container = client
@@ -725,7 +763,9 @@ async fn run_task_on_basilica(
         .await
         .context("Failed to provision Basilica container")?;
 
-    let host = container.ssh_host.as_deref()
+    let host = container
+        .ssh_host
+        .as_deref()
         .context("No SSH host in container info")?;
     let port = container.ssh_port.unwrap_or(22);
     let user = container.ssh_user.as_deref().unwrap_or("root");
@@ -762,7 +802,11 @@ async fn run_task_on_basilica(
 
         let (_, stderr, exit) = ssh_exec(host, port, user, &clone_cmd, timeout, ssh_key).await?;
         if exit != 0 {
-            anyhow::bail!("Clone failed on container (exit {}): {}", exit, &stderr[..stderr.len().min(500)]);
+            anyhow::bail!(
+                "Clone failed on container (exit {}): {}",
+                exit,
+                &stderr[..stderr.len().min(500)]
+            );
         }
 
         // 4. Install dependencies
@@ -788,13 +832,19 @@ async fn run_task_on_basilica(
 
         // Run runtime install (not filtered - installs Go/Node/Rust/Java from official sources)
         if let Some(ref runtime_cmd) = task.workspace.runtime_install {
-            info!("[{}] Installing runtime on container: {}", task.id, &runtime_cmd[..runtime_cmd.len().min(120)]);
+            info!(
+                "[{}] Installing runtime on container: {}",
+                task.id,
+                &runtime_cmd[..runtime_cmd.len().min(120)]
+            );
             let cmd = format!("cd {work_dir}/repo && {runtime_cmd}");
             let (_, stderr, exit) = ssh_exec(host, port, user, &cmd, timeout, ssh_key).await?;
             if exit != 0 {
                 warn!(
                     "[{}] Runtime install failed on container (exit {}): {}",
-                    task.id, exit, &stderr[..stderr.len().min(500)]
+                    task.id,
+                    exit,
+                    &stderr[..stderr.len().min(500)]
                 );
             }
         }
@@ -806,13 +856,20 @@ async fn run_task_on_basilica(
                 if effective_cmd.is_empty() {
                     continue;
                 }
-                info!("[{}] Installing on container: {}", task.id, &effective_cmd[..effective_cmd.len().min(120)]);
+                info!(
+                    "[{}] Installing on container: {}",
+                    task.id,
+                    &effective_cmd[..effective_cmd.len().min(120)]
+                );
                 let install_cmd = format!("cd {work_dir}/repo && {effective_cmd}");
-                let (_, stderr, exit) = ssh_exec(host, port, user, &install_cmd, timeout, ssh_key).await?;
+                let (_, stderr, exit) =
+                    ssh_exec(host, port, user, &install_cmd, timeout, ssh_key).await?;
                 if exit != 0 {
                     warn!(
                         "[{}] Install failed on container (exit {}): {}",
-                        task.id, exit, &stderr[..stderr.len().min(500)]
+                        task.id,
+                        exit,
+                        &stderr[..stderr.len().min(500)]
                     );
                 }
             }
@@ -829,22 +886,41 @@ async fn run_task_on_basilica(
         // Write prompt
         let escaped_prompt = task.prompt.replace('\'', "'\\''");
         ssh_exec(
-            host, port, user,
-            &format!("cat > {work_dir}/repo/_task_prompt.md << 'TASKPROMPTEOF'\n{}\nTASKPROMPTEOF", task.prompt),
-            timeout, ssh_key,
-        ).await?;
+            host,
+            port,
+            user,
+            &format!(
+                "cat > {work_dir}/repo/_task_prompt.md << 'TASKPROMPTEOF'\n{}\nTASKPROMPTEOF",
+                task.prompt
+            ),
+            timeout,
+            ssh_key,
+        )
+        .await?;
 
         let agent_output = if let Some(archive_bytes) = agent_archive {
             // Upload agent archive via scp
-            let local_tmp = std::env::temp_dir().join(format!("agent-{}.zip", uuid::Uuid::new_v4()));
+            let local_tmp =
+                std::env::temp_dir().join(format!("agent-{}.zip", uuid::Uuid::new_v4()));
             tokio::fs::write(&local_tmp, archive_bytes).await?;
-            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/agent.zip"), timeout, ssh_key).await?;
+            scp_to(
+                host,
+                port,
+                user,
+                &local_tmp,
+                &format!("{work_dir}/agent.zip"),
+                timeout,
+                ssh_key,
+            )
+            .await?;
             let _ = tokio::fs::remove_file(&local_tmp).await;
 
             // Extract and run on remote
             let mut env_exports = String::new();
             env_exports.push_str(&format!("export REPO_DIR={work_dir}/repo && "));
-            env_exports.push_str(&format!("export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "));
+            env_exports.push_str(&format!(
+                "export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "
+            ));
             for (k, v) in agent_env {
                 let escaped_v = v.replace('\'', "'\\''");
                 env_exports.push_str(&format!("export {}='{}' && ", k, escaped_v));
@@ -860,9 +936,14 @@ async fn run_task_on_basilica(
             );
 
             let (stdout, stderr, exit) = ssh_exec(
-                host, port, user, &run_agent_cmd,
-                Duration::from_secs(config.agent_timeout_secs), ssh_key,
-            ).await?;
+                host,
+                port,
+                user,
+                &run_agent_cmd,
+                Duration::from_secs(config.agent_timeout_secs),
+                ssh_key,
+            )
+            .await?;
 
             if exit != 0 {
                 warn!("[{}] Agent exited with code {} on container", task.id, exit);
@@ -872,12 +953,23 @@ async fn run_task_on_basilica(
             // Legacy single-file agent
             let local_tmp = std::env::temp_dir().join(format!("agent-{}.py", uuid::Uuid::new_v4()));
             tokio::fs::write(&local_tmp, agent_code).await?;
-            scp_to(host, port, user, &local_tmp, &format!("{work_dir}/repo/_agent_code.py"), timeout, ssh_key).await?;
+            scp_to(
+                host,
+                port,
+                user,
+                &local_tmp,
+                &format!("{work_dir}/repo/_agent_code.py"),
+                timeout,
+                ssh_key,
+            )
+            .await?;
             let _ = tokio::fs::remove_file(&local_tmp).await;
 
             let mut env_exports = String::new();
             env_exports.push_str(&format!("export REPO_DIR={work_dir}/repo && "));
-            env_exports.push_str(&format!("export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "));
+            env_exports.push_str(&format!(
+                "export TASK_PROMPT={work_dir}/repo/_task_prompt.md && "
+            ));
             for (k, v) in agent_env {
                 let escaped_v = v.replace('\'', "'\\''");
                 env_exports.push_str(&format!("export {}='{}' && ", k, escaped_v));
@@ -896,7 +988,16 @@ async fn run_task_on_basilica(
         };
 
         // 6. Capture agent patch
-        let agent_patch = match ssh_exec(host, port, user, &format!("cd {work_dir}/repo && git diff"), Duration::from_secs(30), ssh_key).await {
+        let agent_patch = match ssh_exec(
+            host,
+            port,
+            user,
+            &format!("cd {work_dir}/repo && git diff"),
+            Duration::from_secs(30),
+            ssh_key,
+        )
+        .await
+        {
             Ok((stdout, _, _)) => stdout,
             Err(_) => String::new(),
         };
@@ -932,10 +1033,15 @@ async fn run_task_on_basilica(
             ).await?;
 
             let (stdout, stderr, exit) = ssh_exec(
-                host, port, user,
+                host,
+                port,
+                user,
                 &format!("cd {work_dir}/repo && bash '{remote_script}' 2>&1"),
-                Duration::from_secs(config.test_timeout_secs), ssh_key,
-            ).await.unwrap_or_else(|e| (String::new(), format!("Error: {:#}", e), -1));
+                Duration::from_secs(config.test_timeout_secs),
+                ssh_key,
+            )
+            .await
+            .unwrap_or_else(|e| (String::new(), format!("Error: {:#}", e), -1));
 
             test_results.push(TaskTestResult {
                 name: name.clone(),
@@ -948,15 +1054,23 @@ async fn run_task_on_basilica(
         let all_passed = test_results.iter().all(|t| t.passed);
         let test_output_combined = test_results
             .iter()
-            .map(|t| format!(
-                "=== {} (exit {}) ===\n{}\n{}",
-                t.name, t.exit_code, t.output,
-                if t.passed { "PASS" } else { "FAIL" }
-            ))
+            .map(|t| {
+                format!(
+                    "=== {} (exit {}) ===\n{}\n{}",
+                    t.name,
+                    t.exit_code,
+                    t.output,
+                    if t.passed { "PASS" } else { "FAIL" }
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n\n");
 
-        result.status = if all_passed { TaskStatus::Completed } else { TaskStatus::Failed };
+        result.status = if all_passed {
+            TaskStatus::Completed
+        } else {
+            TaskStatus::Failed
+        };
         result.passed = Some(all_passed);
         result.reward = if all_passed { 1.0 } else { 0.0 };
         result.test_results = test_results;
@@ -972,7 +1086,10 @@ async fn run_task_on_basilica(
     // Always clean up the container
     info!("[{}] Destroying container {}...", task.id, rental_id);
     if let Err(e) = client.stop_cpu_rental(&rental_id).await {
-        warn!("[{}] Failed to stop container {}: {}", task.id, rental_id, e);
+        warn!(
+            "[{}] Failed to stop container {}: {}",
+            task.id, rental_id, e
+        );
     }
 
     task_result
@@ -1108,10 +1225,7 @@ async fn run_agent(
         }
 
         // Log extracted agent directory structure for debugging
-        debug!(
-            "Agent directory resolved to: {}",
-            agent_dir.display()
-        );
+        debug!("Agent directory resolved to: {}", agent_dir.display());
         if let Ok(mut entries) = tokio::fs::read_dir(&agent_dir).await {
             let mut files = Vec::new();
             while let Ok(Some(entry)) = entries.next_entry().await {

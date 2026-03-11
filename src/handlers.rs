@@ -63,8 +63,14 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/ws", get(ws::ws_handler))
         .route("/basilica/containers", post(basilica_create_container))
         .route("/basilica/containers", get(basilica_list_containers))
-        .route("/basilica/containers/:rental_id", get(basilica_get_container))
-        .route("/basilica/containers/:rental_id", axum::routing::delete(basilica_stop_container))
+        .route(
+            "/basilica/containers/:rental_id",
+            get(basilica_get_container),
+        )
+        .route(
+            "/basilica/containers/:rental_id",
+            axum::routing::delete(basilica_stop_container),
+        )
         .route("/basilica/cpu-offerings", get(basilica_list_cpu_offerings))
         .route("/basilica/gpu-offerings", get(basilica_list_gpu_offerings))
         .route("/basilica/balance", get(basilica_get_balance))
@@ -1444,7 +1450,9 @@ async fn evaluate_with_stored_agent(
 
 // ── Basilica container management handlers ──
 
-fn get_basilica_client(state: &AppState) -> Result<&BasilicaClient, (StatusCode, Json<serde_json::Value>)> {
+fn get_basilica_client(
+    state: &AppState,
+) -> Result<&BasilicaClient, (StatusCode, Json<serde_json::Value>)> {
     state.basilica_client.as_deref().ok_or_else(|| (
         StatusCode::SERVICE_UNAVAILABLE,
         Json(serde_json::json!({"error": "Basilica API not configured. Set BASILICA_API_TOKEN."})),
@@ -1495,16 +1503,22 @@ async fn basilica_create_container(
                 ))?;
                 key.id
             } else {
-                let existing = client.get_ssh_key().await.map_err(|e| (
-                    StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": format!("Failed to get SSH key: {}", e)})),
-                ))?;
+                let existing = client.get_ssh_key().await.map_err(|e| {
+                    (
+                        StatusCode::BAD_GATEWAY,
+                        Json(serde_json::json!({"error": format!("Failed to get SSH key: {}", e)})),
+                    )
+                })?;
                 match existing {
                     Some(k) => k.id,
-                    None => return Err((
-                        StatusCode::BAD_REQUEST,
-                        Json(serde_json::json!({"error": "No SSH key found. Provide ssh_public_key_id or ssh_public_key."})),
-                    )),
+                    None => {
+                        return Err((
+                            StatusCode::BAD_REQUEST,
+                            Json(
+                                serde_json::json!({"error": "No SSH key found. Provide ssh_public_key_id or ssh_public_key."}),
+                            ),
+                        ))
+                    }
                 }
             }
         }
@@ -1515,11 +1529,9 @@ async fn basilica_create_container(
             let rental = if let Some(offering_id) = req.offering_id {
                 client.start_cpu_rental(&offering_id, &ssh_key_id).await
             } else {
-                let info = client.provision_cpu_container(
-                    &ssh_key_id,
-                    req.min_cpu,
-                    req.min_memory_gb,
-                ).await;
+                let info = client
+                    .provision_cpu_container(&ssh_key_id, req.min_cpu, req.min_memory_gb)
+                    .await;
                 return match info {
                     Ok(container) => Ok((
                         StatusCode::CREATED,
@@ -1527,7 +1539,9 @@ async fn basilica_create_container(
                     )),
                     Err(e) => Err((
                         StatusCode::BAD_GATEWAY,
-                        Json(serde_json::json!({"error": format!("Failed to provision CPU container: {}", e)})),
+                        Json(
+                            serde_json::json!({"error": format!("Failed to provision CPU container: {}", e)}),
+                        ),
                     )),
                 };
             };
@@ -1546,7 +1560,9 @@ async fn basilica_create_container(
                 )),
                 Err(e) => Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": format!("Failed to start CPU rental: {}", e)})),
+                    Json(
+                        serde_json::json!({"error": format!("Failed to start CPU rental: {}", e)}),
+                    ),
                 )),
             }
         }
@@ -1572,13 +1588,17 @@ async fn basilica_create_container(
                 )),
                 Err(e) => Err((
                     StatusCode::BAD_GATEWAY,
-                    Json(serde_json::json!({"error": format!("Failed to start GPU rental: {}", e)})),
+                    Json(
+                        serde_json::json!({"error": format!("Failed to start GPU rental: {}", e)}),
+                    ),
                 )),
             }
         }
         other => Err((
             StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({"error": format!("Unknown container_type: {}. Use 'cpu' or 'gpu'.", other)})),
+            Json(
+                serde_json::json!({"error": format!("Unknown container_type: {}. Use 'cpu' or 'gpu'.", other)}),
+            ),
         )),
     }
 }
@@ -1616,7 +1636,9 @@ async fn basilica_stop_container(
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<serde_json::Value>)> {
     let client = get_basilica_client(&state)?;
     match client.stop_rental(&rental_id).await {
-        Ok(()) => Ok(Json(serde_json::json!({"status": "stopped", "rental_id": rental_id}))),
+        Ok(()) => Ok(Json(
+            serde_json::json!({"status": "stopped", "rental_id": rental_id}),
+        )),
         Err(e) => Err((
             StatusCode::BAD_GATEWAY,
             Json(serde_json::json!({"error": format!("Failed to stop container: {}", e)})),

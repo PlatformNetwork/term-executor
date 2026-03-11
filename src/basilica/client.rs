@@ -15,16 +15,14 @@ pub struct BasilicaClient {
 
 impl BasilicaClient {
     pub fn new(api_token: &str) -> Result<Self> {
-        let base_url = std::env::var("BASILICA_API_URL")
-            .unwrap_or_else(|_| DEFAULT_API_URL.to_string());
+        let base_url =
+            std::env::var("BASILICA_API_URL").unwrap_or_else(|_| DEFAULT_API_URL.to_string());
 
         let mut headers = reqwest::header::HeaderMap::new();
         let auth_value = format!("Bearer {}", api_token);
         headers.insert(
             reqwest::header::AUTHORIZATION,
-            auth_value
-                .parse()
-                .context("Invalid API token format")?,
+            auth_value.parse().context("Invalid API token format")?,
         );
 
         let client = reqwest::Client::builder()
@@ -40,7 +38,11 @@ impl BasilicaClient {
 
     pub async fn health(&self) -> Result<HealthResponse> {
         let url = format!("{}/health", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Basilica health check failed")?;
         self.handle_response(resp, "health").await
     }
@@ -53,14 +55,23 @@ impl BasilicaClient {
             name: name.to_string(),
             public_key: public_key.to_string(),
         };
-        let resp = self.client.post(&url).json(&body).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
             .context("Failed to register SSH key")?;
         self.handle_response(resp, "register_ssh_key").await
     }
 
     pub async fn get_ssh_key(&self) -> Result<Option<SshKeyResponse>> {
         let url = format!("{}/ssh-keys", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to get SSH key")?;
         if resp.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(None);
@@ -71,7 +82,11 @@ impl BasilicaClient {
 
     pub async fn delete_ssh_key(&self) -> Result<()> {
         let url = format!("{}/ssh-keys", self.base_url);
-        let resp = self.client.delete(&url).send().await
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
             .context("Failed to delete SSH key")?;
         self.handle_empty_response(resp, "delete_ssh_key").await
     }
@@ -81,14 +96,23 @@ impl BasilicaClient {
     pub async fn start_rental(&self, req: &StartRentalRequest) -> Result<RentalResponse> {
         let url = format!("{}/rentals", self.base_url);
         info!("Starting Basilica rental: image={}", req.container_image);
-        let resp = self.client.post(&url).json(req).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(req)
+            .send()
+            .await
             .context("Failed to start rental")?;
         self.handle_response(resp, "start_rental").await
     }
 
     pub async fn get_rental(&self, rental_id: &str) -> Result<RentalStatusResponse> {
         let url = format!("{}/rentals/{}", self.base_url, rental_id);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to get rental status")?;
         self.handle_response(resp, "get_rental").await
     }
@@ -96,14 +120,22 @@ impl BasilicaClient {
     pub async fn stop_rental(&self, rental_id: &str) -> Result<()> {
         let url = format!("{}/rentals/{}", self.base_url, rental_id);
         info!("Stopping Basilica rental: {}", rental_id);
-        let resp = self.client.delete(&url).send().await
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
             .context("Failed to stop rental")?;
         self.handle_empty_response(resp, "stop_rental").await
     }
 
     pub async fn list_rentals(&self) -> Result<ListRentalsResponse> {
         let url = format!("{}/rentals", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to list rentals")?;
         self.handle_response(resp, "list_rentals").await
     }
@@ -111,35 +143,63 @@ impl BasilicaClient {
     // ── Secure cloud CPU rentals ──
 
     pub async fn list_cpu_offerings(&self) -> Result<ListCpuOfferingsResponse> {
-        let url = format!("{}/secure-cloud/cpu-prices?available_only=true", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let url = format!(
+            "{}/secure-cloud/cpu-prices?available_only=true",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to list CPU offerings")?;
         self.handle_response(resp, "list_cpu_offerings").await
     }
 
-    pub async fn start_cpu_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<SecureCloudRentalResponse> {
+    pub async fn start_cpu_rental(
+        &self,
+        offering_id: &str,
+        ssh_key_id: &str,
+    ) -> Result<SecureCloudRentalResponse> {
         let url = format!("{}/secure-cloud/cpu-rentals/start", self.base_url);
         let body = StartCpuRentalRequest {
             offering_id: offering_id.to_string(),
             ssh_public_key_id: ssh_key_id.to_string(),
         };
         info!("Starting Basilica CPU rental: offering={}", offering_id);
-        let resp = self.client.post(&url).json(&body).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
             .context("Failed to start CPU rental")?;
         self.handle_response(resp, "start_cpu_rental").await
     }
 
     pub async fn list_cpu_rentals(&self) -> Result<SecureCloudRentalListResponse> {
         let url = format!("{}/secure-cloud/cpu-rentals", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to list CPU rentals")?;
         self.handle_response(resp, "list_cpu_rentals").await
     }
 
     pub async fn stop_cpu_rental(&self, rental_id: &str) -> Result<StopRentalResponse> {
-        let url = format!("{}/secure-cloud/cpu-rentals/{}/stop", self.base_url, rental_id);
+        let url = format!(
+            "{}/secure-cloud/cpu-rentals/{}/stop",
+            self.base_url, rental_id
+        );
         info!("Stopping Basilica CPU rental: {}", rental_id);
-        let resp = self.client.post(&url).json(&serde_json::json!({})).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
             .context("Failed to stop CPU rental")?;
         self.handle_response(resp, "stop_cpu_rental").await
     }
@@ -147,20 +207,36 @@ impl BasilicaClient {
     // ── Secure cloud GPU rentals ──
 
     pub async fn list_gpu_offerings(&self) -> Result<serde_json::Value> {
-        let url = format!("{}/secure-cloud/gpu-prices?available_only=true", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let url = format!(
+            "{}/secure-cloud/gpu-prices?available_only=true",
+            self.base_url
+        );
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to list GPU offerings")?;
         self.handle_response(resp, "list_gpu_offerings").await
     }
 
-    pub async fn start_gpu_rental(&self, offering_id: &str, ssh_key_id: &str) -> Result<SecureCloudRentalResponse> {
+    pub async fn start_gpu_rental(
+        &self,
+        offering_id: &str,
+        ssh_key_id: &str,
+    ) -> Result<SecureCloudRentalResponse> {
         let url = format!("{}/secure-cloud/rentals/start", self.base_url);
         let body = StartCpuRentalRequest {
             offering_id: offering_id.to_string(),
             ssh_public_key_id: ssh_key_id.to_string(),
         };
         info!("Starting Basilica GPU rental: offering={}", offering_id);
-        let resp = self.client.post(&url).json(&body).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(&body)
+            .send()
+            .await
             .context("Failed to start GPU rental")?;
         self.handle_response(resp, "start_gpu_rental").await
     }
@@ -168,24 +244,44 @@ impl BasilicaClient {
     pub async fn stop_gpu_rental(&self, rental_id: &str) -> Result<StopRentalResponse> {
         let url = format!("{}/secure-cloud/rentals/{}/stop", self.base_url, rental_id);
         info!("Stopping Basilica GPU rental: {}", rental_id);
-        let resp = self.client.post(&url).json(&serde_json::json!({})).send().await
+        let resp = self
+            .client
+            .post(&url)
+            .json(&serde_json::json!({}))
+            .send()
+            .await
             .context("Failed to stop GPU rental")?;
         self.handle_response(resp, "stop_gpu_rental").await
     }
 
     // ── Deployments ──
 
-    pub async fn create_deployment(&self, req: &CreateDeploymentRequest) -> Result<DeploymentResponse> {
+    pub async fn create_deployment(
+        &self,
+        req: &CreateDeploymentRequest,
+    ) -> Result<DeploymentResponse> {
         let url = format!("{}/deployments", self.base_url);
-        info!("Creating Basilica deployment: name={}, image={}", req.instance_name, req.image);
-        let resp = self.client.post(&url).json(req).send().await
+        info!(
+            "Creating Basilica deployment: name={}, image={}",
+            req.instance_name, req.image
+        );
+        let resp = self
+            .client
+            .post(&url)
+            .json(req)
+            .send()
+            .await
             .context("Failed to create deployment")?;
         self.handle_response(resp, "create_deployment").await
     }
 
     pub async fn get_deployment(&self, name: &str) -> Result<DeploymentResponse> {
         let url = format!("{}/deployments/{}", self.base_url, name);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to get deployment")?;
         self.handle_response(resp, "get_deployment").await
     }
@@ -193,7 +289,11 @@ impl BasilicaClient {
     pub async fn delete_deployment(&self, name: &str) -> Result<DeleteDeploymentResponse> {
         let url = format!("{}/deployments/{}", self.base_url, name);
         info!("Deleting Basilica deployment: {}", name);
-        let resp = self.client.delete(&url).send().await
+        let resp = self
+            .client
+            .delete(&url)
+            .send()
+            .await
             .context("Failed to delete deployment")?;
         self.handle_response(resp, "delete_deployment").await
     }
@@ -202,7 +302,11 @@ impl BasilicaClient {
 
     pub async fn get_balance(&self) -> Result<BalanceResponse> {
         let url = format!("{}/billing/balance", self.base_url);
-        let resp = self.client.get(&url).send().await
+        let resp = self
+            .client
+            .get(&url)
+            .send()
+            .await
             .context("Failed to get balance")?;
         self.handle_response(resp, "get_balance").await
     }
@@ -216,16 +320,28 @@ impl BasilicaClient {
         min_memory_gb: Option<u32>,
     ) -> Result<ContainerInfo> {
         let offerings = self.list_cpu_offerings().await?;
-        let offering = offerings.nodes.iter()
+        let offering = offerings
+            .nodes
+            .iter()
             .filter(|o| {
                 o.availability.unwrap_or(false)
                     && min_cpu.map_or(true, |c| o.vcpu_count.unwrap_or(0) >= c)
                     && min_memory_gb.map_or(true, |m| o.system_memory_gb.unwrap_or(0) >= m)
             })
             .min_by(|a, b| {
-                let rate_a: f64 = a.hourly_rate.as_deref().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
-                let rate_b: f64 = b.hourly_rate.as_deref().and_then(|s| s.parse().ok()).unwrap_or(f64::MAX);
-                rate_a.partial_cmp(&rate_b).unwrap_or(std::cmp::Ordering::Equal)
+                let rate_a: f64 = a
+                    .hourly_rate
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(f64::MAX);
+                let rate_b: f64 = b
+                    .hourly_rate
+                    .as_deref()
+                    .and_then(|s| s.parse().ok())
+                    .unwrap_or(f64::MAX);
+                rate_a
+                    .partial_cmp(&rate_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .context("No CPU offering matches the requested specs")?;
 
@@ -239,7 +355,10 @@ impl BasilicaClient {
         );
 
         let rental = self.start_cpu_rental(&offering.id, ssh_key_id).await?;
-        info!("CPU rental started: {} (status: {})", rental.rental_id, rental.status);
+        info!(
+            "CPU rental started: {} (status: {})",
+            rental.rental_id, rental.status
+        );
 
         self.wait_for_cpu_ssh(&rental.rental_id).await
     }
@@ -259,7 +378,9 @@ impl BasilicaClient {
 
                         if r.status == "running" || r.status == "active" {
                             if let Some(ref ip) = r.ip_address {
-                                let ssh_user = r.ssh_command.as_deref()
+                                let ssh_user = r
+                                    .ssh_command
+                                    .as_deref()
                                     .and_then(|c| c.strip_prefix("ssh "))
                                     .and_then(|c| c.split('@').next())
                                     .unwrap_or("root")
@@ -267,8 +388,14 @@ impl BasilicaClient {
 
                                 // Verify SSH is actually reachable before returning
                                 let ssh_key_path = std::env::var("BASILICA_SSH_KEY").ok();
-                                if !self.check_ssh_ready(ip, 22, &ssh_user, ssh_key_path.as_deref()).await {
-                                    debug!("Rental {} has IP {} but SSH not ready yet", rental_id, ip);
+                                if !self
+                                    .check_ssh_ready(ip, 22, &ssh_user, ssh_key_path.as_deref())
+                                    .await
+                                {
+                                    debug!(
+                                        "Rental {} has IP {} but SSH not ready yet",
+                                        rental_id, ip
+                                    );
                                     continue;
                                 }
 
@@ -287,7 +414,11 @@ impl BasilicaClient {
                         }
 
                         if r.status == "failed" || r.status == "error" || r.status == "stopped" {
-                            anyhow::bail!("Rental {} entered terminal state: {}", rental_id, r.status);
+                            anyhow::bail!(
+                                "Rental {} entered terminal state: {}",
+                                rental_id,
+                                r.status
+                            );
                         }
                     } else {
                         warn!("Rental {} not found in CPU rental list", rental_id);
@@ -307,14 +438,24 @@ impl BasilicaClient {
     }
 
     /// Check if SSH is reachable on the given host by running a simple command.
-    async fn check_ssh_ready(&self, host: &str, port: u16, user: &str, ssh_key: Option<&str>) -> bool {
+    async fn check_ssh_ready(
+        &self,
+        host: &str,
+        port: u16,
+        user: &str,
+        ssh_key: Option<&str>,
+    ) -> bool {
         let target = format!("{}@{}", user, host);
         let port_str = port.to_string();
         let mut args = vec![
-            "-o", "StrictHostKeyChecking=no",
-            "-o", "UserKnownHostsFile=/dev/null",
-            "-o", "ConnectTimeout=5",
-            "-o", "LogLevel=ERROR",
+            "-o",
+            "StrictHostKeyChecking=no",
+            "-o",
+            "UserKnownHostsFile=/dev/null",
+            "-o",
+            "ConnectTimeout=5",
+            "-o",
+            "LogLevel=ERROR",
         ];
         if let Some(key) = ssh_key {
             args.extend_from_slice(&["-i", key]);
@@ -350,15 +491,12 @@ impl BasilicaClient {
                 &body[..body.len().min(500)]
             );
         }
-        resp.json::<T>().await
+        resp.json::<T>()
+            .await
             .with_context(|| format!("Failed to parse Basilica {} response", operation))
     }
 
-    async fn handle_empty_response(
-        &self,
-        resp: reqwest::Response,
-        operation: &str,
-    ) -> Result<()> {
+    async fn handle_empty_response(&self, resp: reqwest::Response, operation: &str) -> Result<()> {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
