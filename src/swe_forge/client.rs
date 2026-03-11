@@ -222,6 +222,7 @@ impl HuggingFaceClient {
             .args(["clone", "--depth", "1"])
             .arg(&repo_url)
             .arg(cache_dir.as_os_str())
+            .env("GIT_LFS_SKIP_SMUDGE", "1")
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
